@@ -1,4 +1,4 @@
-# MagicOriG 防炸机说明
+# MagicXM4 防炸机说明
 
 ## 为什么 SystemUI hook 危险
 
@@ -39,8 +39,8 @@ SystemUI 是 Android 最重要的系统进程，负责状态栏、通知栏、�
 ## 调试命令
 
 ```bash
-# 监听所有 MagicOriG 日志
-adb logcat -s "MagicOriG-*"
+# 监听所有 MagicXM4 日志
+adb logcat -s "MagicXM4-*"
 
 # 查看 SystemUI 是否崩溃（爆炸信号）
 adb logcat -s "AndroidRuntime:E" | grep -i systemui

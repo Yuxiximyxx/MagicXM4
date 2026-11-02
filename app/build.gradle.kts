@@ -10,26 +10,26 @@ plugins {
 
 // 发布签名密钥库。*.jks 在 .gitignore 里，克隆仓库后该文件默认不存在；
 // 构建脚本据此回退到 debug 签名，保证 assembleRelease 仍能产出可安装的 APK。
-val releaseKeystore = file("signing/magicorig.jks")
+val releaseKeystore = file("signing/magicxm4.jks")
 
 android {
-    namespace = "io.github.yuxiximyxx.magicfree4"
+    namespace = "io.github.yuxiximyxx.magicxm4"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.yuxiximyxx.magicfree4"
+        applicationId = "io.github.yuxiximyxx.magicxm4"
         minSdk = 34   // Android 14 (MagicOS 8 / HarmonyOS NEXT)
         targetSdk = 35
-        versionCode = 200057
-        versionName = "2.9.1"
+        versionCode = 300000
+        versionName = "3.0.0"
     }
 
     signingConfigs {
         create("release") {
             storeFile = releaseKeystore
-            storePassword = "magicorig123"
-            keyAlias = "magicorig"
-            keyPassword = "magicorig123"
+            storePassword = "magicxm4123"
+            keyAlias = "magicxm4"
+            keyPassword = "magicxm4123"
         }
     }
 
@@ -52,7 +52,7 @@ android {
             signingConfig = if (releaseKeystore.exists()) {
                 signingConfigs.getByName("release")
             } else {
-                println("MagicOriG: 未找到 $releaseKeystore，assembleRelease 将使用 debug 签名")
+                println("MagicXM4: 未找到 $releaseKeystore，assembleRelease 将使用 debug 签名")
                 signingConfigs.getByName("debug")
             }
             proguardFiles(

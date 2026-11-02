@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键：在 GitHub 建仓库（若不存在）→ 推送 main 与 v2.0.0 → 校验远端。
+# 一键：在 GitHub 建仓库（若不存在）→ 推送 main 与当前 tag → 校验远端。
 # 需要的细粒度 PAT 权限：Account: Administration(RW) + Repository: Contents(RW) + All repositories
 # 用法：GH_TOKEN=github_pat_xxx ./scripts/bootstrap-github.sh [public|private]
 # token 只用于本次调用，不写入 .git/config
@@ -7,7 +7,7 @@ set -euo pipefail
 
 : "${GH_TOKEN:?需要 GH_TOKEN 环境变量}"
 OWNER="Yuxiximyxx"
-REPO="MagicFree4"
+REPO="MagicXM4"
 VIS="${1:-private}"
 API="https://api.github.com"
 AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
@@ -19,7 +19,7 @@ if [ "$code" = "200" ]; then
   echo "  已存在，跳创建"
 elif [ "$code" = "404" ]; then
   echo "  不存在，创建中（${VIS}）"
-  body=$(printf '{"name":"%s","description":"OPPO Enco Free4 on Honor MagicOS 11: device-center ANC + per-ear battery (LSPosed; HeyMelody protocol port of MagicOriG + QuickBuds)","private":%s,"has_issues":true,"has_wiki":false,"auto_init":false}' "$REPO" "$([ "$VIS" = public ] && echo false || echo true)")
+  body=$(printf '{"name":"%s","description":"Sony WH-1000XM4 on Honor MagicOS 11: device-center ANC switch + battery (LSPosed; Sony SPP protocol port of MagicFree4 + SonyHeadphonesClient)","private":%s,"has_issues":true,"has_wiki":false,"auto_init":false}' "$REPO" "$([ "$VIS" = public ] && echo false || echo true)")
   out=$("${CURL[@]}" -X POST "${AUTH[@]}" -d "$body" "$API/user/repos" -w "\n%{http_code}")
   echo "$out" | tail -1 | grep -qx 201 || { echo "创建失败："; echo "$out" | head -20; exit 1; }
   echo "  创建成功"

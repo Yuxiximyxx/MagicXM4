@@ -1,5 +1,5 @@
-name=MagicFree4
-description=Honor MagicOS integration for OPPO Enco Free4 (HeyMelody protocol): device-center ANC + per-ear battery + Quick Settings tile
+name=MagicXM4
+description=Honor MagicOS integration for Sony WH-1000XM4 (Sony SPP protocol): device-center ANC switch + battery + Quick Settings tile
 minApiVersion=101
 # LSPosed: targetVersion = extractIntPart(prop.getProperty("targetApiVersion"))
 # 缺少此键时 extractIntPart(null) 抛 NPE，且构造函数只 catch IOException/OOM，

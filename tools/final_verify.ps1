@@ -1,4 +1,4 @@
-# MagicOriG 任务4收官验证脚本（设备中心降噪适配）
+# MagicXM4 任务4收官验证脚本（设备中心降噪适配）
 # 用法: pwsh tools/final_verify.ps1 [-BallX 640] [-BallY 1400] [-SkipInstall]
 param(
     [int]$BallX = 640,

@@ -1,4 +1,4 @@
-﻿# MagicOriG 全量验证脚本 —— 设备一回来跑这个
+﻿# MagicXM4 全量验证脚本 —— 设备一回来跑这个
 # 用法: powershell -ExecutionPolicy Bypass -File tools\full_verify.ps1
 param([switch]$SkipInstall)
 $ErrorActionPreference = 'Continue'
@@ -42,10 +42,10 @@ if (-not $SkipInstall) {
 }
 
 Write-Host '════ 2. 基础信号 ════'
-Write-Host "connected flag: $((& $adb shell 'settings get global magicorig_connected' 2>$null|Out-String).Trim())"
-Write-Host "battery:        $((& $adb shell 'settings get global magicorig_battery' 2>$null|Out-String).Trim())"
-Write-Host "current_anc:    $((& $adb shell 'settings get global magicorig_current_anc' 2>$null|Out-String).Trim())"
-Write-Host "last_anc:       $((& $adb shell 'settings get global magicorig_last_anc' 2>$null|Out-String).Trim())"
+Write-Host "connected flag: $((& $adb shell 'settings get global magicxm4_connected' 2>$null|Out-String).Trim())"
+Write-Host "battery:        $((& $adb shell 'settings get global magicxm4_battery' 2>$null|Out-String).Trim())"
+Write-Host "current_anc:    $((& $adb shell 'settings get global magicxm4_current_anc' 2>$null|Out-String).Trim())"
+Write-Host "last_anc:       $((& $adb shell 'settings get global magicxm4_last_anc' 2>$null|Out-String).Trim())"
 
 Write-Host '════ 3. 重启相关进程 ════'
 & $adb shell 'am force-stop com.hihonor.controlcenter' 2>$null | Out-Null

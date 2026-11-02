@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# MagicOriG 一键重启作用域脚本
+# MagicXM4 一键重启作用域脚本
 # 类似 HyperOriG 的 restart_scope.sh，但针对 MagicOS 进程名调整
 #
 # 使用方法：在模块设置中授予 Root 权限后执行
@@ -16,4 +16,4 @@ for PKG in $PIDS; do
     fi
 done
 
-echo "MagicOriG scope restart done"
+echo "MagicXM4 scope restart done"

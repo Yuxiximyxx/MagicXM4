@@ -13,7 +13,7 @@
     </queries>
 
     <application
-        android:name=".MagicOriGApp"
+        android:name=".MagicXM4App"
         android:label="@string/app_name"
         android:description="@string/app_subtitle"
         android:icon="@mipmap/ic_launcher"
@@ -21,7 +21,7 @@
         android:extractNativeLibs="false"
         android:enableOnBackInvokedCallback="false"
         android:supportsRtl="true"
-        android:theme="@style/Theme.MagicOriG">
+        android:theme="@style/Theme.MagicXM4">
 
         <activity-alias
             android:name=".LauncherActivity"
@@ -52,12 +52,12 @@
         </activity>
 
         <activity android:name=".PopupActivity"
-            android:theme="@style/Theme.MagicOriG.Popup"
+            android:theme="@style/Theme.MagicXM4.Popup"
             android:taskAffinity=""
             android:excludeFromRecents="true"
             android:exported="true">
             <intent-filter>
-                <action android:name="io.github.yuxiximyxx.magicfree4.action.show_pods_ui" />
+                <action android:name="io.github.yuxiximyxx.magicxm4.action.show_pods_ui" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
@@ -68,7 +68,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="让 OPPO Enco Free4 在 MagicOS 上享受荣耀自家耳机待遇。" />
+            android:value="让 Sony WH-1000XM4 在 MagicOS 上享受荣耀自家耳机待遇。" />
         <meta-data
             android:name="xposedminversion"
             android:value="101" />
@@ -81,7 +81,7 @@
             android:name=".hook.QuickSettingsAncTile"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
-            android:label="MagicOriG"
+            android:label="MagicXM4"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />

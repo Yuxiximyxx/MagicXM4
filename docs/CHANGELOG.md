@@ -1,5 +1,55 @@
 # 变更记录
 
+## 3.0.0 — 换设备：Sony WH-1000XM4（索尼协议层）
+
+从 MagicFree4 v2.9.1 fork，换两层：设备身份（耳塞 → 头戴）与协议层（欢律 → 索尼 SPP）。
+
+> ⚠️ **本版未经真机验证**。协议层按两套独立参考交叉验证 + 49 个 JVM 单测，
+> 但没有一行是在 XM4 上跑出来的。上机核对清单见 README「首次上机要确认的事」。
+
+### 改名与隔离
+
+| 项 | 旧（MagicFree4） | 新（MagicXM4） |
+|---|---|---|
+| 包名 | `io.github.yuxiximyxx.magicfree4` | `io.github.yuxiximyxx.magicxm4` |
+| 应用名 | MagicFree4 | MagicXM4 |
+| Settings.Global 键 | `magicorig_*` | `magicxm4_*` |
+| 设备名（注入） | OPPO Enco Free4 | WH-1000XM4 |
+| 协议 | 欢律 `pods/hem` | 索尼 `pods/sony` |
+
+键空间与包名都换了，所以**可以和已装的 MagicFree4 共存**（SPP 抢占风险见 README）。
+
+### 新增 `pods/sony`
+
+- `SonyWire.kt` — 帧层：`3E … 3C`、`3D` 转义、校验和、流式解帧 `Framer`
+  （移植自 SonyHeadphonesClient，修掉上游两个 bug：转义后再校验、双 START 时重同步而非断连）
+- `SonyCommands.kt` — 命令号表（电量 `10/11/13`、降噪 `66/67/68/69`、固件 `04/05`）、
+  载荷构造、`SeqCounter`、两种设置布局 `NcAsmLayout`
+- `SonyState.kt` — 应答解析 → `SonyEvent`（`Ack` / `NoiseState` / `Battery` / `Firmware` / `Unknown`）
+- `SonyWireTest.kt` — 49 个纯 JVM 用例（帧往返、转义、手算校验和、模糊分片、命令载荷逐字节、三种应答解析）
+
+### 接线
+
+- SPP UUID 换成 `96CC203E-5068-46ad-B32D-E316F5E069BA`；保留 insecure + 通道兜底
+- 连接后查询序列：降噪 → 电量 → 固件 → 再回读降噪（不发 INIT 握手）
+- 出站序号统一由 `SeqCounter` 分发；收到 ACK 后把计数器对齐到 `ack.seq + 1`
+- 降噪：荣耀三档 ↔ 索尼模式；「风噪降低」归并到「降噪」但写原始模式日志
+- 电量：单总电量喂给 L/R 同值，充电仓留空
+- 运行期开关：`magicxm4_sony_layout`（0=风噪布局 / 1=旧 dualSingle 布局）、
+  `magicxm4_ambient_level`（通透档环境声等级，默认 15）
+
+### 详情页裁剪
+
+- 电量：三个环 → 一个「电量」环
+- 噪声控制：四档 → 三档（去掉「自适应」，XM4 没有这个模式）
+- 移除入口：均衡器、设备双连、耳机设置（手势/响铃/佩戴检测/提示音）
+- 关于页：协议改为「索尼私有协议（SPP）」+ 正确 UUID
+- 降噪高亮数据源从 `magicxm4_anc_raw`（位掩码）改为 `magicxm4_current_anc`（三档 status）
+
+### 明确做成 no-op 的入口（不撒谎、不广播假状态）
+
+响铃查找、手势绑定、贴合度检测、功能位开关、EQ 预设/自定义、提示音音量、设备列表查询。
+
 ## 2.9.1 — 首页改为耳机详情页
 
 - 启动入口（`activity-alias LauncherActivity`）从 `MainActivity` 改为 **`EarphoneDetailActivity`**：

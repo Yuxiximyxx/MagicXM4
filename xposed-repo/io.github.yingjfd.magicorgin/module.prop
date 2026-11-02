@@ -1,6 +1,0 @@
-name=MagicOriG
-description=Honor MagicOS integration for NickHCK YuanDao OriG in earbuds: device-center ANC + per-ear battery + Quick Settings tile
-minApiVersion=101
-targetApiVersion=102
-staticScope=true
-autoHotReload=false
