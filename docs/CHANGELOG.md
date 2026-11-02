@@ -1,5 +1,39 @@
 # 变更记录
 
+## 3.0.5 — 头戴图标落地；断连卡片对齐原生（实测通过）
+
+### 头戴图标：能换上了
+
+`createDeviceBall` 返回的是 **BasicDeviceBallViewAdapter**，不是 View（第一版以为能直接换，失败）。
+改成在卡片视图到手后**直接遍历窗口里的 ImageView**：按 id `icon_image_view`（球）/ `device_icon`（卡片头部）
+找到，再用「往上第一个 `device_ball_name` / `device_name` 等于 WH-1000XM4」判定归属，命中才替换。
+
+只换了 1~2 个（球 + 卡片头部），OPPO / 华为的图标一个都没动。
+
+### 卡片出现的时机：终于找到了稳定入口
+
+前面试过三个时机都不行：
+- `updateEarphoneUIByOnlineType`：断连时不触发
+- `createSections`：断连时不一定跑
+- `View.onAttachedToWindow`：能挂上但拿不到「这就是我们的卡片」
+
+真正的入口是 `DeviceServiceCardDataMgr.createDeviceServiceCard` —— 它**返回 `DeviceServiceCardView`**，
+卡片一出现就一定有。所有「卡片态」处理（离线收缩、图标替换）都挂到这里。
+
+⚠️ 注意它传进来的 `ball.isOnline()` 被我们强制成 true 了，**真实在线态必须读 `magicxm4_connected`**。
+
+### 断连时卡片（实测截图对照 HUAWEI FreeBuds 5）
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 标题旁的小电池 | 显示 90% | **隐藏**（按 id `battery_info_container`） |
+| 电量段 | 显示 | **隐藏**（按 id `earphone_battery_title`） |
+| 噪声控制段 | 显示一排点了没用的档位 | **隐藏** |
+| 数量 | 4 档 | 3 档（响铃查找已整行移除） |
+| 图标 | 耳塞 | **头戴** |
+
+只剩「去连接 / 更多设置」，和原生华为耳机断开时一致。
+
 ## 3.0.4 — 自绘头戴图标；断连时按原生样子收缩卡片
 
 ### 头戴图标

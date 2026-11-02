@@ -427,9 +427,10 @@ object ControlCenterNoiseHook : HookContext() {
                             }
                             // ★ 换头戴图标：荣耀按 prodId 查自己的图标表，借用的机型码没有图标
                             //   就回落成耳塞。这里在球建好后直接把图标换成我们自绘的头戴图标。
-                            if (isOurMac(id?.toString()) && ret is android.view.View) {
-                                runCatching { replaceBallIcon(ret) }
-                                    .onFailure { Log.w(TAG, "换头戴图标失败: ${it.javaClass.simpleName}: ${it.message}") }
+                            // 注意：createDeviceBall 返回的是 **BasicDeviceBallViewAdapter**，不是 View，
+                            // 换图标要等球视图自己的 hook（见下面 updateEarphoneUIByOnlineType）。
+                            if (isOurMac(id?.toString()) && ret != null) {
+                                diag("ball_class", ret.javaClass.name)
                             }
                             if (isOurMac(id?.toString()) && (ret == null || isVerboseDump())) {
                                 dumpFields("createDeviceBall.args[0]", info)
@@ -506,6 +507,23 @@ object ControlCenterNoiseHook : HookContext() {
                     val ret = chain.proceed()
                     val size = (ret as? List<*>)?.size
                     Log.w(TAG, "▶ createSections(config=$config) → size=$size")
+                    // 卡片装配完成 → 延迟几次把离线收缩 + 图标替换跑一遍。
+                    // 断连时 updateEarphoneUIByOnlineType 不一定会触发，这里是唯一稳定的时机。
+                    runCatching {
+                        val ball = ourBallRef?.get()
+                        if (ball != null) {
+                            val online = isOurConnected()
+                            listOf(0L, 250L, 700L, 1500L).forEach { d ->
+                                ball.postDelayed({
+                                    runCatching {
+                                        val root = ball.rootView
+                                        cleanupCard(root)
+                                        applyOfflineVisibility(root, online)
+                                    }
+                                }, d)
+                            }
+                        }
+                    }
                     ret
                 }
                 Log.i(TAG, "installed: DeviceServiceCardDataMgr.createSections [装配观察]")
@@ -582,6 +600,66 @@ object ControlCenterNoiseHook : HookContext() {
                 diag("hook_ble", "fail: ${it.javaClass.simpleName}: ${it.message}")
             }
 
+            // ── 11i) ★ 卡片出现时机（唯一稳定的一处）──
+            //   服务卡的展开不走 updateEarphoneUIByOnlineType，createSections 在断连时也可能不跑，
+            //   所以挂在 View.onAttachedToWindow 上：只有当这个 View 的子树里同时有
+            //   `device_name` == WH-1000XM4 时才算「我们的卡片刚挂上」，再做离线收缩与图标替换。
+            runCatching {
+                val attached = android.view.View::class.java.getDeclaredMethod("onAttachedToWindow")
+                module.hook(attached).intercept { chain ->
+                    val ret = chain.proceed()
+                    runCatching {
+                        val v = chain.thisObject as? android.view.ViewGroup
+                        if (v != null && v.childCount > 0) {
+                            val nameView = findByIdName(v, "device_name") as? android.widget.TextView
+                            if (nameView?.text?.toString()?.trim() == OUR_NAME) {
+                                val online = isOurConnected()
+                                listOf(0L, 200L, 600L, 1400L).forEach { d ->
+                                    v.postDelayed({
+                                        runCatching {
+                                            cleanupCard(v)
+                                            applyOfflineVisibility(v, online)
+                                        }
+                                    }, d)
+                                }
+                                diag("card", "card attached online=$online")
+                            }
+                        }
+                    }
+                    ret
+                }
+                Log.i(TAG, "installed: View.onAttachedToWindow [卡片时机]")
+            }.onFailure {
+                Log.w(TAG, "onAttachedToWindow hook 失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+
+            // ── 11h) ★ 设备球图标：换成自绘头戴图标 ──
+            //   球图标是荣耀按 prodId 查自己图标表拿到的，我们借用的机型码没有图标 → 默认耳塞。
+            //   这里 hook ImageView 的两个设置入口：只有当被设置的正是球图标（id=icon_image_view）
+            //   并且它所属的那个球显示的是 WH-1000XM4 时才替换，别的设备一个都不碰。
+            runCatching {
+                val iconId = currentApp()?.resources
+                    ?.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") ?: 0
+                if (iconId == 0) throw IllegalStateException("icon_image_view id 未找到")
+                val drawableMethod = android.widget.ImageView::class.java
+                    .getMethod("setImageDrawable", android.graphics.drawable.Drawable::class.java)
+                module.hook(drawableMethod).intercept { chain ->
+                    val view = chain.thisObject as? android.widget.ImageView
+                    if (view != null && view.id == iconId && belongsToOurBall(view)) {
+                        val replaced = ourHeadphoneDrawable()
+                        if (replaced != null) {
+                            diag("icon", "setImageDrawable → 头戴图标")
+                            return@intercept replaced.let { chain.args[0] = it; chain.proceed() }
+                        }
+                    }
+                    chain.proceed()
+                }
+                Log.i(TAG, "installed: ImageView.setImageDrawable [球图标替换]")
+            }.onFailure {
+                Log.w(TAG, "球图标 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
+                diag("icon", "hook fail: ${it.message}")
+            }
+
             // ── 11c) ★ FIX-005：让「响铃查找」可点 ──
             //   DeviceServiceCardAdapter.updateEarphoneUIByOnlineType(boolean) 会按在线态
             //   把 BID_FIND_IOT_DEVICE 置为 DISABLED 且 setClickable(false)。
@@ -607,6 +685,7 @@ object ControlCenterNoiseHook : HookContext() {
                     runCatching {
                         val self = chain.thisObject as? android.view.View
                         if (self != null) {
+                            if (findTextView(self, OUR_NAME) != null) ourBallRef = java.lang.ref.WeakReference(self)
                             listOf(0L, 300L, 900L, 2000L).forEach { d ->
                                 self.postDelayed({ cleanupCard(self.rootView) }, d)
                                 self.postDelayed(
@@ -1070,6 +1149,21 @@ object ControlCenterNoiseHook : HookContext() {
                 val cardRet = chain.proceed()
                 if (isOurMac(id?.toString())) {
                     diag("card", "id=$id online=$online ok=${cardRet != null} retCls=${cardRet?.javaClass?.simpleName}")
+                    // ★ 卡片视图到手 —— 这是最稳定的时机：离线收缩 + 图标替换都在这里驱动。
+                    //   注意 online 用的是球自己的 isOnline（被我们强制成 true 了），
+                    //   真实在线态必须读 magicxm4_connected。
+                    val cardView = cardRet as? android.view.View
+                    if (cardView != null) {
+                        val realOnline = isOurConnected()
+                        listOf(0L, 200L, 600L, 1400L).forEach { d ->
+                            cardView.postDelayed({
+                                runCatching {
+                                    cleanupCard(cardView)
+                                    applyOfflineVisibility(cardView, realOnline)
+                                }
+                            }, d)
+                        }
+                    }
                 }
                 cardRet
             }
@@ -1120,6 +1214,10 @@ object ControlCenterNoiseHook : HookContext() {
      */
     private val OTHER_DEVICE_NAMES = listOf("Enco Free4", "FreeBuds", "MacBook", "LKY")
     private const val OUR_PROD = "00VVD9"
+
+    /** 我们那颗球的 View（弱引用）。卡片打开时没有其它稳定的 View 入口，靠它拿窗口根视图。 */
+    @Volatile
+    private var ourBallRef: java.lang.ref.WeakReference<android.view.View>? = null
 
     // ── 真实设备 MAC（跨进程桥）──────────────────────────────
     // 上游把作者自己那副耳机的 MAC 写死在整条注入链里（26 处引用）。
@@ -1517,11 +1615,85 @@ object ControlCenterNoiseHook : HookContext() {
      * 图标 id `icon_image_view` 是从真机 dump 出来的（DeviceBallView → … → HwImageView#icon_image_view）。
      * 用 createPackageContext 拿模块自己的资源，避免依赖宿主资源表里有没有这张图。
      */
-    private fun replaceBallIcon(ball: android.view.View) {
-        val ctx = currentApp() ?: return
-        val id = ball.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
-        if (id == 0) return
-        val icon = ball.findViewById<android.view.View>(id) as? android.widget.ImageView ?: return
+    /**
+     * 在当前窗口子树里找 `icon_image_view`，凡是属于我们那颗球的，换成头戴图标。
+     *
+     * 为什么按树找而不是挂 hook：球的图标可能在模块 hook 装好之前就已经设过一次，
+     * 之后再没人调用 setImageDrawable，hook 永远等不到。直接改视图树最稳。
+     */
+    private fun fixBallIcon(root: android.view.View) {
+        val ids = listOf("icon_image_view", "device_icon")
+            .map { root.resources.getIdentifier(it, "id", "com.hihonor.controlcenter") }
+            .filter { it != 0 }
+        if (ids.isEmpty()) {
+            diag("icon", "id=0")
+            return
+        }
+        var hit = 0
+        val stack = ArrayDeque<android.view.View>()
+        stack.addLast(root)
+        while (stack.isNotEmpty()) {
+            val v = stack.removeLast()
+            if (v.id in ids && v is android.widget.ImageView && belongsToOurBall(v)) {
+                val d = ourHeadphoneDrawable()
+                if (d != null) { v.setImageDrawable(d); hit++ }
+            }
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) stack.addLast(v.getChildAt(i))
+            }
+        }
+        if (hit > 0) diag("icon", "已替换 $hit 个头戴图标")
+    }
+
+    /** 从图标 View 往上找，看这个球的名字是不是我们的设备名。 */
+    private fun belongsToOurBall(icon: android.view.View): Boolean {
+        // 精确判定：从图标往上，第一个能找到 `device_ball_name` 的层级就是这颗球本身，
+        // 直接读它的名字 —— 比「子树里有没有 OUR_NAME」可靠得多
+        // （球是在同一个 RecyclerView 里，往上爬两层就能看见别的球，会误伤）。
+        var node: android.view.View? = icon
+        var depth = 0
+        while (node != null && depth < 8) {
+            // 球用 device_ball_name，卡片头部用 device_name —— 两个都要认
+            val nameView = (findByIdName(node, "device_ball_name") ?: findByIdName(node, "device_name"))
+                as? android.widget.TextView
+            if (nameView != null) {
+                return nameView.text?.toString()?.trim() == OUR_NAME
+            }
+            node = node.parent as? android.view.View
+            depth++
+        }
+        return false
+    }
+
+    /** 取模块自己 APK 里的头戴图标（不依赖宿主资源表）。 */
+    private fun ourHeadphoneDrawable(): android.graphics.drawable.Drawable? = runCatching {
+        val ctx = currentApp() ?: return null
+        val moduleCtx = ctx.createPackageContext(
+            "io.github.yuxiximyxx.magicxm4", android.content.Context.CONTEXT_IGNORE_SECURITY
+        )
+        moduleCtx.resources.getDrawable(io.github.yuxiximyxx.magicxm4.R.drawable.ic_headphone, null)
+    }.getOrNull()
+
+    private fun replaceBallIcon(ball: Any?) {
+        val view = ball as? android.view.View
+        if (view == null) {
+            diag("icon", "不是 View: ${ball?.javaClass?.name}")
+            return
+        }
+        val ctx = currentApp() ?: run {
+            diag("icon", "ctx=null")
+            return
+        }
+        val id = view.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
+        if (id == 0) {
+            diag("icon", "id icon_image_view = 0")
+            return
+        }
+        val icon = view.findViewById<android.view.View>(id) as? android.widget.ImageView
+        if (icon == null) {
+            diag("icon", "findViewById 未命中（id=$id）")
+            return
+        }
         val moduleCtx = ctx.createPackageContext(
             "io.github.yuxiximyxx.magicxm4", android.content.Context.CONTEXT_IGNORE_SECURITY
         )
@@ -1542,6 +1714,14 @@ object ControlCenterNoiseHook : HookContext() {
     private fun applyOfflineVisibility(root: android.view.View?, online: Boolean) {
         if (root == null) return
         var changed = 0
+
+        // 标题右侧那颗小电池（device_battery_in_card 所在容器）—— 原生耳机断开时也没有
+        findByIdName(root, "battery_info_container")?.let { container ->
+            if (belongsToUs(container)) {
+                val want = if (online) android.view.View.VISIBLE else android.view.View.GONE
+                if (container.visibility != want) { container.visibility = want; changed++ }
+            }
+        }
 
         findByIdName(root, "earphone_battery_title")?.let { title ->
             if (belongsToUs(title)) {
@@ -1583,6 +1763,8 @@ object ControlCenterNoiseHook : HookContext() {
 
     private fun cleanupCard(root: android.view.View?) {
         if (root == null) return
+        // 球图标：直接在当前窗口里按 id 找到我们那颗球的图标并替换（不依赖任何 hook 时序）。
+        runCatching { fixBallIcon(root) }.onFailure { Log.w(TAG, "fixBallIcon 失败: ${it.message}") }
         // 卡片真的画出来了 = 宿主进程已经活透，此时拿 Context 最稳。
         HonorAssetsDump.dump(currentApp())
         var hidden = 0
