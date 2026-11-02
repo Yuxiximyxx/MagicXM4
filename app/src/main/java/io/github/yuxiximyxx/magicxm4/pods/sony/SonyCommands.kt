@@ -272,6 +272,16 @@ object SonyCommands {
             value = deviceSeq and 0xFF
         }
 
+        /**
+         * 取当前序号但**不递增**。
+         *
+         * 2026-11-02 真机实证：XM4 只认设备自己回执过的那个 seq。我们一开始按「每发一条 +1」
+         * 递增到 3/4/5/6，结果所有 INIT 都收不到 ACK，查询也一条不回；而计数器还在 0/1 时
+         * INIT 是能拿到应答的。Gadgetbridge 的做法就是「全程用同一个 sequenceNumber，
+         * 只在收到 ACK 时采纳设备回的号」——所以对外发送一律用这个函数。
+         */
+        fun current(): Int = value
+
         fun reset() {
             value = 0
         }

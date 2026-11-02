@@ -633,8 +633,14 @@ class SonyWireTest {
         assertTrue(event(bytes(0x99, 0x01)) is SonyEvent.Unknown)
         // 非 ACK 类型但空载荷
         assertTrue(event(ByteArray(0), type = 12) is SonyEvent.Unknown)
-        // INIT 应答（协议版本探测）不消费
-        assertTrue(event(bytes(0x01, 0x00, 0x01, 0x00)) is SonyEvent.Unknown)
+        // INIT 应答有专门事件（真机实测 WH-1000XM4 回 01 00 70 00，长度 4 → V1）：
+        // 它是「设备进入可查询状态」的信号，连接后要靠它再发查询序列，所以不能当 Unknown 丢掉。
+        val init = event(bytes(0x01, 0x00, 0x01, 0x00))
+        assertTrue("应为 Init，实际 $init", init is SonyEvent.Init)
+        assertEquals(1, (init as SonyEvent.Init).version)
+
+        // 音量通知：已识别但不消费（XM4 每秒推一条，归到 Ignored 才不会刷爆日志）
+        assertTrue(event(bytes(0xA9, 0x01, 0x20, 0x08)) is SonyEvent.Ignored)
     }
 
     // ── 11. 出站帧头与序号 ─────────────────────────────────────

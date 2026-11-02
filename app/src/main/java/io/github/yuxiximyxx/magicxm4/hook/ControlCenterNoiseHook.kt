@@ -594,7 +594,18 @@ object ControlCenterNoiseHook : HookContext() {
                     val real = isOurConnected()
                     chain.args[0] = real
                     diag("finddevice", "updateEarphoneUIByOnlineType($real)")
-                    chain.proceed()
+                    val ret = chain.proceed()
+                    // ★ 去掉「响铃查找」：WH-1000XM4 不支持响铃。卡片上这一行是荣耀按
+                    //   布局渲染的，没法从数据侧去掉 —— 那就拿到窗口根视图后按文案找到它，
+                    //   连同它的容器一起隐藏（只隐藏 TextView 会留下一个空按钮）。
+                    runCatching {
+                        val self = chain.thisObject as? android.view.View
+                        // 卡片是后来才展开的，root 视图里此刻可能还没有这一行 → 多次重试。
+                        listOf(0L, 300L, 900L, 2000L).forEach { delayMs ->
+                            self?.postDelayed({ hideRowByText(self.rootView, "响铃查找") }, delayMs)
+                        }
+                    }.onFailure { Log.w(TAG, "隐藏响铃查找失败: ${it.message}") }
+                    ret
                 }
                 Log.i(TAG, "installed: BasicDeviceBallView.updateEarphoneUIByOnlineType [响铃查找+连接文案]")
                 diag("hook_finddevice", "installed")
@@ -796,6 +807,16 @@ object ControlCenterNoiseHook : HookContext() {
                         if (tv != null && tv.text?.toString() == "透传") {
                             tv.text = "通透"
                             diag("label", "透传 → 通透")
+                        }
+                        // ★ 去掉「自适应」：WH-1000XM4 没有自适应降噪，卡片却按 4 档渲染
+                        //   （uiconfig 里 noiseSwitchNum=4）。这里直接把这颗按钮整颗隐藏，
+                        //   比让它点了没反应或偷偷映射到降噪都诚实。
+                        if (v != null && tv != null) {
+                            val label = tv.text?.toString().orEmpty()
+                            if (label.contains("自适应")) {
+                                v.visibility = android.view.View.GONE
+                                diag("label", "自适应 已隐藏")
+                            }
                         }
                     }
                     ret
@@ -1431,4 +1452,40 @@ object ControlCenterNoiseHook : HookContext() {
             ?: return null
         android.provider.Settings.Global.getString(app.contentResolver, "magicxm4_last_anc")
     }.getOrNull()
+    /**
+     * 按文案找到卡片里的一行并隐藏它（连同「只装着它」的那层容器）。
+     *
+     * 为什么要连容器一起隐藏：荣耀服务卡里每一行都是「外框 + 图标 + 文案」三层，
+     * 只把 TextView 设 GONE 会留下一个空框和图标，看起来像界面坏了。
+     * 这里向上找到「只有一个子 View 的祖先」再隐藏，正好对应那种单纯包裹型的容器。
+     */
+    private fun hideRowByText(root: android.view.View?, text: String) {
+        if (root == null) return
+        val target = findTextView(root, text) ?: return
+        var node: android.view.View = target
+        while (true) {
+            val parent = node.parent as? android.view.ViewGroup ?: break
+            if (parent.childCount != 1) break
+            node = parent
+        }
+        if (node.visibility != android.view.View.GONE) {
+            node.visibility = android.view.View.GONE
+            diag("hide", "已隐藏「$text」")
+        }
+    }
+
+    private fun findTextView(view: android.view.View, text: String): android.view.View? {
+        if (view is android.widget.TextView && view.visibility == android.view.View.VISIBLE &&
+            view.text?.toString()?.contains(text) == true
+        ) {
+            return view
+        }
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                findTextView(view.getChildAt(i), text)?.let { return it }
+            }
+        }
+        return null
+    }
+
 }

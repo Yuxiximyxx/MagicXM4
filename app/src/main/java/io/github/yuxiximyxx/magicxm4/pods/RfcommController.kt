@@ -45,6 +45,13 @@ object RfcommController {
     private const val RFCOMM_READ_TIMEOUT_MS = 5_000L
     /** 单条命令等 ACK 的上限。设备不回 ACK 时不至于把队列堵死。 */
     private const val SONY_ACK_TIMEOUT_MS = 800
+    /**
+     * 相邻两条命令之间的最小间隔。
+     *
+     * 实测：设备回 ACK 用 `1 - seq`，所以「收到 ACK 立刻发下一条」会让两条命令只隔几十毫秒，
+     * 设备就不回应答了；把间隔固定拉到 300ms 后恢复。宁可慢，也别让设备把命令吃掉。
+     */
+    private const val SONY_MIN_SPACING_MS = 300
 
     /**
      * 索尼 SPP UUID（SonyHeadphonesClient Client/Constants.h:11 实证）。
@@ -126,12 +133,16 @@ object RfcommController {
                 } catch (e: InterruptedException) {
                     return@launch
                 }
-                if (!isConnected.get()) {
-                    // 断连时清空积压，避免重连后一次性倾泻过期命令
-                    sonyOutbound.clear()
+                if (socket == null) {
+                    // ★ 不能丢队列：实测「socket 为空 → 重建链路」期间到达的切档命令一旦被丢掉，
+                    //   设备就永远停在旧档位，而 UI 已经乐观地把它画成新档位。
+                    //   这里只是等，重建完成后照常发出。
+                    sonyDiag("QUEUE-WAIT ${SonyWire.hex(SonyWire.build(build(sonySeq.current())))}")
+                    sonyOutbound.offer(build)
+                    delay(300)
                     continue
                 }
-                val seq = sonySeq.next()
+                val seq = sonySeq.current()
                 val msg = build(seq)
                 awaitingAckSeq = seq
                 val hex = SonyWire.hex(msg.payload)
@@ -139,7 +150,10 @@ object RfcommController {
                 sonyDiag("TX $seq:$hex")
                 sendPacketSafe(SonyWire.build(msg))
                 var waited = 0
-                while (awaitingAckSeq == seq && waited < SONY_ACK_TIMEOUT_MS && isConnected.get()) {
+                while (isConnected.get() &&
+                    (waited < SONY_MIN_SPACING_MS ||
+                        (awaitingAckSeq == seq && waited < SONY_ACK_TIMEOUT_MS))
+                ) {
                     delay(20)
                     waited += 20
                 }
@@ -562,13 +576,20 @@ object RfcommController {
             )
         }
         sonyDiag("RX ${msg.seq}:${SonyWire.hex(msg.payload)}")
-        when (val event = SonyParser.parse(msg)) {
+        val event = SonyParser.parse(msg)
+        // 设备每发一条 COMMAND 都等我们回一条 ACK（Gadgetbridge SonyHeadphonesProtocol:171）。
+        // 不回的话设备侧会一直等，后续应答就不发了 —— 这正是「查询发出去没人理」的第二个成因。
+        if (event !is SonyEvent.Ack) {
+            sendDeviceAck((1 - msg.seq) and 0xFF)
+        }
+        when (event) {
             is SonyEvent.Ack -> {
-                if (event.seq == awaitingAckSeq) awaitingAckSeq = -1
-                // 设备确认了某条请求。把序号计数器对齐到「它的下一位」，
-                // 否则长连接里两边各走各的、迟早错开（Gadgetbridge 同款处理）。
-                sonySeq.adopt((event.seq + 1) and 0xFF)
-                if (BuildConfig.DEBUG) Log.v(TAG, "ACK seq=${event.seq}")
+                // 实测（XM4 / 2026-11-02）：设备回 ACK 用 `1 - 我们的 seq`，把它采纳为下一条的
+                // 序号，出站序号就会 1,0,1,0 交替 —— **这是唯一被验证能让设备应答的走法**。
+                // 试过把序号固定成 0（更"规整"），结果 66/10/04 三条查询又一条也不回了。
+                // 所以这里照抄 Gadgetbridge：ACK 到达即采纳设备的号。
+                awaitingAckSeq = -1
+                sonySeq.adopt(event.seq)
             }
 
             is SonyEvent.NoiseState -> applySonyNoise(event.state)
@@ -871,6 +892,18 @@ object RfcommController {
         }
     }
 
+    /** 给设备的消息回一条空载荷 ACK（序号取 1-seq，与 Gadgetbridge 一致）。 */
+    private fun sendDeviceAck(seq: Int) {
+        runCatching {
+            sendPacketSafe(
+                SonyWire.build(
+                    SonyWire.Message(SonyCommands.DATA_TYPE_ACK, seq and 0xFF, ByteArray(0))
+                )
+            )
+            sonyDiag("ACK-TX $seq")
+        }.onFailure { Log.w(TAG, "回 ACK 失败", it) }
+    }
+
     /**
      * 发一条索尼协议消息。
      *
@@ -1022,7 +1055,26 @@ object RfcommController {
     // 这些入口仍被上层 hook 调用，但发旧 0x4E 帧对 XM4 毫无意义（只会当噪声丢掉），
     // 因此明确做成 no-op 并打日志，保持「不撒谎」：不广播假状态。
     private fun unsupported(feature: String) {
-        Log.i(TAG, "$feature 未在欢律协议中实现，忽略（不影响降噪/电量）")
+        Log.i(TAG, "$feature 在 WH-1000XM4 上不存在，忽略（不影响降噪/电量）")
+        toast("WH-1000XM4 不支持$feature")
+    }
+
+    /**
+     * 在蓝牙进程里弹一个 Toast。
+     *
+     * 为什么需要：荣耀服务卡上有些入口（响铃查找、自适应）是**按 uiconfig 渲染**的，
+     * 我们没法在不逆向卡片布局的情况下把它从界面上抹掉。那就至少做到底线要求——
+     * 点下去要给出「本机不支持」的反馈，而不是静默吞掉、让用户以为模块坏了。
+     */
+    private fun toast(text: String) {
+        runCatching {
+            val ctx = mContext ?: Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? Context
+                ?: return
+            android.os.Handler(ctx.mainLooper).post {
+                runCatching { android.widget.Toast.makeText(ctx, text, android.widget.Toast.LENGTH_SHORT).show() }
+            }
+        }.onFailure { Log.w(TAG, "toast 失败: ${it.message}") }
     }
 
     fun setGameMode(enabled: Boolean) = unsupported("游戏模式")
@@ -1212,7 +1264,7 @@ object RfcommController {
     /** 欢律 0x0400：让耳机自己响铃（对应荣耀设备中心的「响铃查找」）。 */
     fun setFindBuds(on: Boolean) {
         // WH-1000XM4 不支持响铃查找，服务卡上该入口必须置灰（计划书 §功能取舍）
-        if (true) { unsupported("响铃查找"); return }
+        if (true) { unsupported("响铃查找（没有发送任何 SPP 命令）"); return }
         ensureLink()
         val ctx = mContext ?: runCatching {
             Class.forName("android.app.ActivityThread")
@@ -1284,6 +1336,14 @@ object RfcommController {
             1 -> sendSony { SonyCommands.setOff(it, layout = sonyLayout) }
             2 -> sendSony { SonyCommands.setAmbientSound(it, ambientLevel, layout = sonyLayout) }
             5 -> sendSony { SonyCommands.setNoiseCancelling(it, layout = sonyLayout) }
+            7 -> {
+                // 荣耀卡片是 4 档（uiconfig 里 noiseSwitchNum=4），第 4 档叫「自适应」；
+                // WH-1000XM4 没有自适应降噪。这里映射到「降噪」——比点了没反应好，
+                // 但要在日志和诊断里留痕，避免以后误以为设备真支持自适应。
+                Log.i(TAG, "自适应（status=7）在 XM4 上无对应模式 → 按降噪下发")
+                writeGlobal("magicxm4_diag_ancset", "mode=7->5 downgraded")
+                sendSony { SonyCommands.setNoiseCancelling(it, layout = sonyLayout) }
+            }
             else -> {
                 Log.w(TAG, "未知 ANC status=$mode，忽略（不发帧）")
                 writeGlobal("magicxm4_diag_ancset", "mode=$mode unsupported")
