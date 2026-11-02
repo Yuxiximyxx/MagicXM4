@@ -600,11 +600,14 @@ object ControlCenterNoiseHook : HookContext() {
                     //   连同它的容器一起隐藏（只隐藏 TextView 会留下一个空按钮）。
                     runCatching {
                         val self = chain.thisObject as? android.view.View
-                        // 卡片是后来才展开的，root 视图里此刻可能还没有这一行 → 多次重试。
-                        listOf(0L, 300L, 900L, 2000L).forEach { delayMs ->
-                            self?.postDelayed({ hideRowByText(self.rootView, "响铃查找") }, delayMs)
+                        if (self != null) {
+                            listOf(0L, 300L, 900L, 2000L).forEach { d ->
+                                self.postDelayed({ cleanupCard(self.rootView) }, d)
+                            }
+                        } else {
+                            diag("hide", "thisObject 不是 View: ${chain.thisObject?.javaClass?.name}")
                         }
-                    }.onFailure { Log.w(TAG, "隐藏响铃查找失败: ${it.message}") }
+                    }.onFailure { Log.w(TAG, "清理卡片失败: ${it.message}") }
                     ret
                 }
                 Log.i(TAG, "installed: BasicDeviceBallView.updateEarphoneUIByOnlineType [响铃查找+连接文案]")
@@ -809,13 +812,23 @@ object ControlCenterNoiseHook : HookContext() {
                             diag("label", "透传 → 通透")
                         }
                         // ★ 去掉「自适应」：WH-1000XM4 没有自适应降噪，卡片却按 4 档渲染
-                        //   （uiconfig 里 noiseSwitchNum=4）。这里直接把这颗按钮整颗隐藏，
-                        //   比让它点了没反应或偷偷映射到降噪都诚实。
+                        //   （uiconfig 里 noiseSwitchNum=4）。直接隐藏这颗按钮，
+                        //   比让它点了没反应、或偷偷映射到降噪都诚实。
                         if (v != null && tv != null) {
                             val label = tv.text?.toString().orEmpty()
                             if (label.contains("自适应")) {
                                 v.visibility = android.view.View.GONE
                                 diag("label", "自适应 已隐藏")
+                            }
+                        }
+                        // 卡片每次重建都会重置可见性，所以借这个「每颗按钮初始化」的时机
+                        // 对整个窗口重跑一次清理（带若干次延迟重试，覆盖布局晚到的行）。
+                        if (v != null) {
+                            // 注意：必须在延迟回调里**重新取** rootView。
+                            // initModeButton 触发时按钮往往还没 attach，此刻的 rootView 就是按钮自己，
+                            // 拿它去搜「响铃查找」永远搜不到。
+                            listOf(0L, 150L, 400L, 900L, 1800L).forEach { d ->
+                                v.postDelayed({ cleanupCard(v.rootView) }, d)
                             }
                         }
                     }
@@ -1091,6 +1104,12 @@ object ControlCenterNoiseHook : HookContext() {
     /** 上游作者本人那副耳机的 MAC，仅作「从未连接过、读不到真实值」时的兜底。 */
     private const val OUR_MAC = "18:5C:A1:52:10:36"
     private const val OUR_NAME = "WH-1000XM4"
+
+    /**
+     * 同一台手机上其它设备的显示名。用来判断「这个视图子树到底是不是我们那张卡片」——
+     * 球列表把所有设备名放在同一棵子树里，不排除就会误伤别人的卡片。
+     */
+    private val OTHER_DEVICE_NAMES = listOf("Enco Free4", "FreeBuds", "MacBook", "LKY")
     private const val OUR_PROD = "00VVD9"
 
     // ── 真实设备 MAC（跨进程桥）──────────────────────────────
@@ -1459,19 +1478,75 @@ object ControlCenterNoiseHook : HookContext() {
      * 只把 TextView 设 GONE 会留下一个空框和图标，看起来像界面坏了。
      * 这里向上找到「只有一个子 View 的祖先」再隐藏，正好对应那种单纯包裹型的容器。
      */
-    private fun hideRowByText(root: android.view.View?, text: String) {
+    /**
+     * 把卡片上 WH-1000XM4 不支持的入口隐藏掉：响铃查找（不支持响铃）、自适应（没有这个模式）。
+     *
+     * 为什么按文案而不是按 View id：这两个入口的 id 是 controlcenter 私有的，换个 MagicOS
+     * 版本就可能变；文案是从字符串资源来的，反而更稳。匹配到之后连同「只装着它一个子 View」
+     * 的外层容器一起 GONE —— 只隐藏 TextView 会留下一个空框和图标。
+     */
+    private fun cleanupCard(root: android.view.View?) {
         if (root == null) return
-        val target = findTextView(root, text) ?: return
-        var node: android.view.View = target
-        while (true) {
-            val parent = node.parent as? android.view.ViewGroup ?: break
-            if (parent.childCount != 1) break
-            node = parent
+        var hidden = 0
+        for (text in listOf("响铃查找", "自适应")) {
+            val target = findTextView(root, text) ?: continue
+            // ★ 判定「这一处是不是我们的卡片」：从目标文案往上找，第一个包含我方设备名的祖先
+            //   就是这张卡片的容器；如果这个容器里还有**别的**设备名，说明爬到了球列表那一层
+            //   （球列表里所有设备名都在同一棵子树里），必须放弃。
+            //   不这么做的话，会把 MagicFree4（Enco Free4）的卡片一起改坏 —— 实测踩过。
+            val scope = ancestorContainingAlso(target, OUR_NAME, OTHER_DEVICE_NAMES) ?: continue
+            // 层级实测（2026-11-02 dump 真机视图树）：
+            //   响铃查找 = HwTextView#service_name → LinearLayout[2](名字+状态) → LinearLayout#service_card_root[3]
+            //   噪声档位 = HwTextView#noise_mode_text → LinearLayout[2](图标+文案) → 档位按钮根
+            // 两处的形状一致：**文案的上两层的兄弟容器就是这一颗按钮/这一张子卡的根**。
+            // 只隐藏上一层会剩下图标和一个空框（这是第一版的实际效果），所以往上取两层。
+            val upOne = target.parent as? android.view.View
+            val upTwo = upOne?.parent as? android.view.View
+            // 响铃查找：上两层 = service_card_root（整张子卡）
+            // 自适应  ：上两层 = 整排四个档位按钮的容器 → 会把「关闭/降噪/通透」一起藏掉（实测踩过），
+            //           所以只取上一层 = 这一颗按钮本身。
+            var node: android.view.View = if (text == "响铃查找") {
+                upTwo ?: upOne ?: target
+            } else {
+                upOne ?: target
+            }
+            if (node === scope || node.parent === null) node = upOne ?: target
+            if (node.visibility != android.view.View.GONE) {
+                node.visibility = android.view.View.GONE
+                hidden++
+            }
+            // 排障：把「这一行所在的卡片容器」的视图树 dump 出来，确认层级。
+            if (text == "响铃查找" && readGlobal("magicxm4_diag_dump_ui") == "1") {
+                runCatching {
+                    val sb = StringBuilder()
+                    dumpTree(scope, 0, sb)
+                    setGlobal("magicxm4_diag_ui", sb.toString())
+                }
+            }
         }
-        if (node.visibility != android.view.View.GONE) {
-            node.visibility = android.view.View.GONE
-            diag("hide", "已隐藏「$text」")
+        if (hidden > 0) diag("hide", "已隐藏 $hidden 项（${OUR_NAME}）")
+
+    }
+
+    /**
+     * 从 [node] 往上找第一个「同时包含 [required] 且不包含任何 [forbidden]」的祖先。
+     * 找不到返回 null（表示这一处不是我们该动的卡片）。
+     */
+    private fun ancestorContainingAlso(
+        node: android.view.View,
+        required: String,
+        forbidden: List<String>,
+    ): android.view.View? {
+        var cur: android.view.View? = node.parent as? android.view.View
+        while (cur != null) {
+            val hasOurs = findTextView(cur, required) != null
+            if (hasOurs) {
+                val hasOther = forbidden.any { findTextView(cur, it) != null }
+                return if (hasOther) null else cur
+            }
+            cur = cur.parent as? android.view.View
         }
+        return null
     }
 
     private fun findTextView(view: android.view.View, text: String): android.view.View? {
@@ -1487,5 +1562,34 @@ object ControlCenterNoiseHook : HookContext() {
         }
         return null
     }
+
+    private fun dumpTree(v: android.view.View, depth: Int, sb: StringBuilder) {
+        if (depth > 18 || sb.length > 9000) return
+        sb.append("  ".repeat(depth)).append(v.javaClass.simpleName)
+        val id = v.id
+        if (id != android.view.View.NO_ID) {
+            val name = runCatching { v.resources.getResourceEntryName(id) }.getOrNull()
+            sb.append('#').append(name ?: id)
+        }
+        if (v is android.widget.TextView) sb.append(" \"").append(v.text).append('"')
+        if (v is android.view.ViewGroup) sb.append(" [").append(v.childCount).append(']')
+        sb.append('\n')
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) dumpTree(v.getChildAt(i), depth + 1, sb)
+        }
+    }
+
+    private fun readGlobal(key: String): String? = runCatching {
+        val ctx = io.github.yuxiximyxx.magicxm4.utils.DeviceIdentity.currentApp() ?: return null
+        android.provider.Settings.Global.getString(ctx.contentResolver, key)
+    }.getOrNull()
+
+    private fun setGlobal(key: String, value: String) = runCatching {
+        val ctx = io.github.yuxiximyxx.magicxm4.utils.DeviceIdentity.currentApp() ?: return false
+        android.provider.Settings.Global.putString(ctx.contentResolver, key, value)
+        true
+    }.getOrDefault(false)
+
+    private fun ran(@Suppress("UNUSED_PARAMETER") ok: Boolean) = Unit
 
 }
