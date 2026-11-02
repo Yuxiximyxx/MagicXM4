@@ -1,5 +1,38 @@
 # 变更记录
 
+## 3.0.3 — 机型配置可切换（AirPods MAX）+ 断连隐藏噪声控制
+
+### 找到卡片布局的真正来源
+
+荣耀的卡片长什么样，由宿主 `assets/uiconfig/<机型码>.json` 决定，不看我们注入的 prodId：
+
+| 机型码 | noiseSwitchNum | itemList |
+|---|---|---|
+| `FCPG`（AirPods 4 降噪版，之前用的） | 4 | 含 `find_earphone` |
+| `X6MG`（AirPods MAX 2020） | **3** | **不含** `find_earphone` |
+| `WEQW`（AirPods MAX 2024） | 3 | 不含 `find_earphone` |
+
+XM4 正好是「三档 + 不支持响铃」，所以默认改用 **X6MG**：
+`loadFcpgConfig` 现在先试 `magicxm4_uiconfig`（默认 `X6MG`），解析失败再回落 `FCPG`。
+原则是「原生就是三档、没有响铃查找」，不必再去 DOM 里按文案偷藏控件。
+
+> 说明：这一改动在 `com.hihonor.audioaccessorymanager` 进程生效。本轮实测该进程
+> 没有加载到模块（日志里没有 `MagicXM4-Earphone`），所以**卡片目前仍走 DOM 隐藏那条路**。
+> 两条路互不影响：DOM 隐藏只在我们自己的卡片上生效，Free4 的卡片不受影响。
+
+### 断连时隐藏噪声控制（对齐原生华为耳机）
+
+实测 HUAWEI FreeBuds 5 断开时卡片上**没有**噪声控制；我们注入的第三方设备因为强制走
+「在线」渲染，断开后仍显示一排点了没用的档位按钮。现在按 `updateEarphoneUIByOnlineType`
+拿到的真实在线态，离线隐藏整段、在线恢复。
+
+### 其它
+
+- 新增 `HonorAssetsDump`：把宿主 assets 里的机型表 / uiconfig 目录 / 配置内容
+  分块写进 `magicxm4_diag_assets_1..8`，不用 root 就能看（这次就是靠它找到的网络机型表）
+- 机型表实测：`AirPods MAX 2020 = 00X6MG`、`AirPods MAX 2024 = 00WEQW`
+  （`AirPods MAX 2` 在本机 assets 里没有，可能是更新版本才有）
+
 ## 3.0.2 — 服务卡只删 XM4 的入口，不动别人的卡片
 
 3.0.1 的隐藏逻辑是按文案全窗口搜的，结果把 **OPPO Enco Free4 的卡片也一起改了**

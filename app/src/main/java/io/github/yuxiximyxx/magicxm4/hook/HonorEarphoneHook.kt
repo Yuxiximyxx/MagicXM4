@@ -38,6 +38,15 @@ object HonorEarphoneHook : HookContext() {
     override fun onHook() {
         Log.i(TAG, "onHook start pkg=$packageName")
 
+        // 机型表（baseSupportDeviceList.json / earphone_support_list_builtin.json + uiconfig）
+        // 就在这个进程的 assets 里 —— 头戴形态选型要靠它，先 dump 出来。
+        HonorAssetsDump.dump(
+            runCatching {
+                Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+            }.getOrNull()
+        )
+
         // ── 观察点 1：getSmartConnect(mac, cb) ──────────────────────
         runCatching {
             val cb = findClass(CALLBACK)
@@ -377,26 +386,59 @@ object HonorEarphoneHook : HookContext() {
      * 用 app 自己的 Gson 解析 AAM 的 assets/uiconfig/FCPG.json → UiConfigLite。
      * FCPG 的 homepage 含 noiseControl{noiseSwitchNum=4}，正是降噪栏的来源。
      */
+    /**
+     * 用宿主 assets 里的机型 uiconfig 伪造「我们这副耳机」的卡片配置。
+     *
+     * 为什么要换机型：卡片上有没有「响铃查找」、噪声控制几档，全由 `uiconfig/<机型>.json` 决定：
+     *
+     *   FCPG（AirPods 4 降噪版）: noiseSwitchNum=4, itemList 含 find_earphone
+     *   X6MG（AirPods MAX 2020）: noiseSwitchNum=3, itemList **不含** find_earphone
+     *
+     * WH-1000XM4 正好是「三档 + 不支持响铃」，所以默认改用 **X6MG**——
+     * 这样卡片原生就是三档、也没有响铃查找，不用再去 DOM 里按文案偷偷隐藏控件。
+     * 想换别的机型：`adb shell settings put global magicxm4_uiconfig FCPG`。
+     *
+     * 顺序：先试配置的机型，解析失败再回落 FCPG（保证不会因为选错机型导致完全没有降噪栏）。
+     */
+    /** 默认用 AirPods MAX 2020 的卡片配置：头戴形态、三档噪声、没有「响铃查找」。 */
+    private const val DEFAULT_UICONFIG = "X6MG"
+
+    /** 兜底机型（AirPods 4 降噪版）：至少保证有降噪栏。 */
+    private const val FALLBACK_UICONFIG = "FCPG"
+
     private fun loadFcpgConfig(uiClass: Class<*>): Any? {
         cachedConfig?.let { return it }
-        runCatching {
-            val at = Class.forName("android.app.ActivityThread")
-            val app = at.getDeclaredMethod("currentApplication").invoke(null)
-                ?: return null
-            val json = app.javaClass.getMethod("getAssets").invoke(app)
-                .let { assets -> assets.javaClass.getMethod("open", String::class.java)
-                    .invoke(assets, "uiconfig/FCPG.json") }
-                .let { stream -> java.io.InputStreamReader(stream as java.io.InputStream).use { it.readText() } }
-            val gson = Class.forName("com.google.gson.Gson").getDeclaredConstructor().newInstance()
-            val parsed = gson.javaClass.getMethod("fromJson", String::class.java, Class::class.java)
-                .invoke(gson, json, uiClass)
+        for (code in listOf(uiconfigCode(), FALLBACK_UICONFIG).distinct()) {
+            val parsed = runCatching { parseUiConfig(uiClass, code) }.getOrNull() ?: continue
             cachedConfig = parsed
-            Log.i(TAG, "FCPG.json 解析成功: ${json.length} 字节 → $parsed")
+            Log.i(TAG, "uiconfig/$code.json 解析成功 → $parsed")
             return parsed
-        }.onFailure {
-            Log.w(TAG, "loadFcpgConfig 失败: ${it.javaClass.simpleName}: ${it.message}")
         }
+        Log.w(TAG, "uiconfig 解析失败（已尝试 ${uiconfigCode()} / $FALLBACK_UICONFIG）")
         return null
+    }
+
+    /** 运行期可覆盖的机型码，默认 AirPods MAX 2020（头戴、三档、无响铃查找）。 */
+    private fun uiconfigCode(): String {
+        val override = runCatching {
+            val ctx = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+                ?: return@runCatching null
+            android.provider.Settings.Global.getString(ctx.contentResolver, "magicxm4_uiconfig")
+        }.getOrNull()?.trim()
+        return if (override.isNullOrEmpty()) DEFAULT_UICONFIG else override
+    }
+
+    private fun parseUiConfig(uiClass: Class<*>, code: String): Any? {
+        val at = Class.forName("android.app.ActivityThread")
+        val app = at.getDeclaredMethod("currentApplication").invoke(null) ?: return null
+        val json = app.javaClass.getMethod("getAssets").invoke(app)
+            .let { assets -> assets.javaClass.getMethod("open", String::class.java)
+                .invoke(assets, "uiconfig/$code.json") }
+            .let { stream -> java.io.InputStreamReader(stream as java.io.InputStream).use { it.readText() } }
+        val gson = Class.forName("com.google.gson.Gson").getDeclaredConstructor().newInstance()
+        return gson.javaClass.getMethod("fromJson", String::class.java, Class::class.java)
+            .invoke(gson, json, uiClass)
     }
 
     /**

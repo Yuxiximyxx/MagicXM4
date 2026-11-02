@@ -603,6 +603,9 @@ object ControlCenterNoiseHook : HookContext() {
                         if (self != null) {
                             listOf(0L, 300L, 900L, 2000L).forEach { d ->
                                 self.postDelayed({ cleanupCard(self.rootView) }, d)
+                                self.postDelayed(
+                                    { applyNoiseSectionVisibility(self.rootView, real) }, d
+                                )
                             }
                         } else {
                             diag("hide", "thisObject 不是 View: ${chain.thisObject?.javaClass?.name}")
@@ -1485,8 +1488,27 @@ object ControlCenterNoiseHook : HookContext() {
      * 版本就可能变；文案是从字符串资源来的，反而更稳。匹配到之后连同「只装着它一个子 View」
      * 的外层容器一起 GONE —— 只隐藏 TextView 会留下一个空框和图标。
      */
+    /**
+     * 断连时隐藏「噪声控制」整段 —— 对齐原生华为耳机的卡片行为。
+     *
+     * 实测：HUAWEI FreeBuds 5 未连接时卡片上**没有**噪声控制；而我们注入的第三方设备
+     * 因为强制走了「在线」渲染，断开后仍然显示一排点了没用的档位按钮。
+     * 这里按「标题文案 → 上一层容器」定位整段，离线隐藏、在线恢复。
+     */
+    private fun applyNoiseSectionVisibility(root: android.view.View?, online: Boolean) {
+        if (root == null) return
+        val title = findTextView(root, "噪声控制") ?: return
+        val scope = ancestorContainingAlso(title, OUR_NAME, OTHER_DEVICE_NAMES) ?: return
+        val section = title.parent as? android.view.View ?: return
+        val target = if (section === scope) title else section
+        target.visibility = if (online) android.view.View.VISIBLE else android.view.View.GONE
+        diag("noise_sec", "online=$online -> ${if (online) "VISIBLE" else "GONE"}")
+    }
+
     private fun cleanupCard(root: android.view.View?) {
         if (root == null) return
+        // 卡片真的画出来了 = 宿主进程已经活透，此时拿 Context 最稳。
+        HonorAssetsDump.dump(currentApp())
         var hidden = 0
         for (text in listOf("响铃查找", "自适应")) {
             val target = findTextView(root, text) ?: continue
