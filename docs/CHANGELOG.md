@@ -46,6 +46,29 @@
 - 关于页：协议改为「索尼私有协议（SPP）」+ 正确 UUID
 - 降噪高亮数据源从 `magicxm4_anc_raw`（位掩码）改为 `magicxm4_current_anc`（三档 status）
 
+### 运行期开关（真机 A/B 不用重编）
+
+协议层的不确定点全部做成 `Settings.Global` 可改，模块 App 首页新增
+「索尼协议（真机 A/B）」卡片也能直接改：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `magicxm4_sony_layout` | `0` | 降噪载荷布局：0=风噪能力布局，1=旧 dualSingle |
+| `magicxm4_ambient_level` | `15` | 「通透」档 → 索尼环境声等级 1..20 |
+| `magicxm4_device_type` | `Third_EarPhone` | 荣耀设备类型枚举名（头戴形态靠它试） |
+| `magicxm4_diag_hn_types` | 自动 | 本机 `HnDeviceProductType` 全表，供选型 |
+
+新增 `hook/HonorDeviceTypeName.kt` 作为设备类型的唯一取值点：
+四处置类型的地方（JSON 注入、`DeviceInfo` 构造、`LinkDevice` 兜底、`selectLayout` 归位）
+现在都走它，非法名字回退已验证的 `Third_EarPhone` 而不是让设备球消失。
+类型名带 5 秒缓存，改完不用重启进程。
+
+模块设置页同步修正：
+- 电量从「左耳/右耳」两个环改成一个「电量」环（读 `magicxm4_battery_single`）
+- 默认档位从「实验性/深度/普通降噪」改成「关闭/降噪/通透」（XM4 的真实三档）
+- 修正两个记忆键不一致：UI 只写 `magicxm4_last_anc`、控制器只写 `magicxm4_anc_last`，
+  现在两处一起写
+
 ### 明确做成 no-op 的入口（不撒谎、不广播假状态）
 
 响铃查找、手势绑定、贴合度检测、功能位开关、EQ 预设/自定义、提示音音量、设备列表查询。

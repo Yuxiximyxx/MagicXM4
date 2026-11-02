@@ -104,6 +104,13 @@ object SonyCommands {
         const val SOUND_POSITION_OR_MODE_RET = 0x47
         const val SOUND_POSITION_OR_MODE_SET = 0x48
         const val SOUND_POSITION_OR_MODE_NOTIFY = 0x49
+
+        // 音量命令组。本项目不实现音量控制，但 XM4 会**主动**推 VOLUME_NOTIFY（实测约每秒一次），
+        // 不显式识别就会被当成「未识别命令」反复刷日志，把真正的异常淹掉。
+        const val VOLUME_GET = 0xA6
+        const val VOLUME_RET = 0xA7
+        const val VOLUME_SET = 0xA8
+        const val VOLUME_NOTIFY = 0xA9
     }
 
     // ── DATA_TYPE（帧头第 1 字节）──────────────────────────────

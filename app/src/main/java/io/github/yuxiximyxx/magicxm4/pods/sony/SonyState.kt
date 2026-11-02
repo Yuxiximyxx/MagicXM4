@@ -135,6 +135,46 @@ sealed class SonyEvent {
             ((version.hashCode() * 31 + dataType) * 31 + seq) * 31 + raw.contentHashCode()
     }
 
+    /**
+     * INIT 应答：设备的协议版本探测结果。
+     *
+     * 实测（WH-1000XM4，2026-11-02 真机）：载荷 `01 00 70 00`，长度 4 → **V1**。
+     * 这条应答是「设备进入可查询状态」的信号 —— 我们用它在连接后**再**发查询序列。
+     */
+    data class Init(
+        val version: Int,
+        val dataType: Int,
+        val seq: Int,
+        override val raw: ByteArray,
+    ) : SonyEvent() {
+        override fun equals(other: Any?): Boolean =
+            other is Init && version == other.version && dataType == other.dataType &&
+                seq == other.seq && raw.contentEquals(other.raw)
+
+        override fun hashCode(): Int =
+            ((version * 31 + dataType) * 31 + seq) * 31 + raw.contentHashCode()
+    }
+
+    /**
+     * 已识别但本项目不消费的消息（音量通知、协议版本探测等）。
+     *
+     * 为什么单独一类而不并进 [Unknown]：XM4 实测会每秒推一条 `A9 01 00`（音量通知），
+     * 归到 Unknown 就会把日志刷满，真正该看的异常反而看不见。
+     */
+    data class Ignored(
+        val reason: String,
+        val dataType: Int,
+        val seq: Int,
+        override val raw: ByteArray,
+    ) : SonyEvent() {
+        override fun equals(other: Any?): Boolean =
+            other is Ignored && reason == other.reason && dataType == other.dataType &&
+                seq == other.seq && raw.contentEquals(other.raw)
+
+        override fun hashCode(): Int =
+            ((dataType * 31 + seq) * 31 + reason.hashCode()) * 31 + raw.hashCode()
+    }
+
     /** 不认识 / 结构不合法：只留给日志，不影响任何状态。 */
     data class Unknown(
         val dataType: Int,
@@ -194,10 +234,17 @@ object SonyParser {
 
             SonyCommands.Cmd.FW_VERSION_REPLY -> parseFirmware(msg)
 
-            SonyCommands.Cmd.INIT_REPLY -> SonyEvent.Unknown(
-                msg.type, msg.seq, p,
-                "INIT 应答（协议版本探测，长度 4=V1 / 8=V2），本项目不消费",
+            // 4 字节 = V1（XM4），8 字节 = V2。
+            SonyCommands.Cmd.INIT_REPLY -> SonyEvent.Init(
+                version = if (p.size >= 8) 2 else 1,
+                dataType = msg.type,
+                seq = msg.seq,
+                raw = p,
             )
+
+            SonyCommands.Cmd.VOLUME_RET,
+            SonyCommands.Cmd.VOLUME_NOTIFY,
+            -> SonyEvent.Ignored("音量通知", msg.type, msg.seq, p)
 
             else -> SonyEvent.Unknown(msg.type, msg.seq, p, "未识别的命令号 0x" + hexByte(command))
         }

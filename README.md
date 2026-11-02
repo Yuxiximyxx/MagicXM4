@@ -85,7 +85,20 @@
 3. **电量**。查询 `10 00`、应答 `11 00 <level> <charging>`。若设备没回，
    对照 Sony 官方 App 的数值，必要时改用 `10 01`（DUAL 槽）。
 4. **通透档的环境声等级**。默认 15（1..20）：`adb shell settings put global magicxm4_ambient_level 20`。
-5. 日志：`adb logcat -s MagicXM4-Rfcomm`，SPP 收发十六进制都打了。
+5. **头戴形态**。注入类型默认沿用 MagicFree4 真机验证过的 `Third_EarPhone`。
+   模块第一次在 controlcenter 里跑过之后，会把本机 `HnDeviceProductType` 的**全部枚举名**
+   写进 `Settings.Global["magicxm4_diag_hn_types"]`（模块设置页也会显示）。
+   看完名字想试别的：
+   ```bash
+   adb shell settings put global magicxm4_device_type <枚举名>
+   adb shell am force-stop com.hihonor.controlcenter   # 让它重新注入
+   ```
+   枚举里没有的名字会自动回退 `Third_EarPhone`，不会把设备球弄没。
+6. 日志：`adb logcat -s MagicXM4-Rfcomm`，SPP 收发十六进制都打了。
+
+> 上面 1/4/5 三项都可以直接在 **模块 App 首页** 里改（不用 adb）：
+> 「索尼协议（真机 A/B）」卡片里有载荷布局单选、环境声等级加减；
+> 设备类型名和枚举清单也在那张卡片里显示。
 
 ## 协议速查（`pods/sony`）
 
@@ -123,6 +136,19 @@
 | 5 降噪 | effect=`11`，模式=降噪 |
 
 反向：关→1、环境声→2、降噪→5、风噪降低→5（归并但会写原始模式日志）。
+
+## 运行期开关（`Settings.Global`）
+
+真机上不确定的东西**不写死在代码里**，全部做成运行期可改，改完不用重编 APK：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `magicxm4_sony_layout` | `0` | 降噪设置载荷布局：`0`=风噪能力布局（Gadgetbridge），`1`=旧 dualSingle（SonyHeadphonesClient） |
+| `magicxm4_ambient_level` | `15` | 「通透」档对应的索尼环境声等级 1..20 |
+| `magicxm4_device_type` | `Third_EarPhone` | 注入用的荣耀设备类型枚举名；非法值自动回退默认值 |
+| `magicxm4_diag_hn_types` | 自动写入 | 本机 `HnDeviceProductType` 全部枚举名（逗号分隔），选型的证据来源 |
+
+模块 App 首页的「索尼协议（真机 A/B）」卡片可以直接改前两项。
 
 ## 项目结构
 

@@ -221,7 +221,7 @@ object ControlCenterNoiseHook : HookContext() {
                     val prod = ourProd()
                     val our = "{\"deviceId\":\"$mac\"," +
                             "\"deviceName\":\"$OUR_NAME\"," +
-                            "\"hnDeviceType\":\"Third_EarPhone\"," +
+                            "\"hnDeviceType\":\"${HonorDeviceTypeName.current()}\"," +
                             "\"deviceNodeId\":\"$mac\"," +
                             "\"macAddress\":\"$mac\"," +
                             "\"prodId\":\"$prod\"," +
@@ -231,7 +231,7 @@ object ControlCenterNoiseHook : HookContext() {
                                  else trimmed.dropLast(1) + ",$our]"
                     result.javaClass.getMethod("setExt", String::class.java)
                         .invoke(result, merged)
-                    Log.w(TAG, "★ 设备列表已注入 $OUR_NAME (Third_EarPhone)")
+                    Log.w(TAG, "★ 设备列表已注入 $OUR_NAME (${HonorDeviceTypeName.current()})")
                 }.onFailure {
                     Log.w(TAG, "getDeviceList 注入失败: ${it.javaClass.simpleName}: ${it.message}")
                 }
@@ -251,8 +251,9 @@ object ControlCenterNoiseHook : HookContext() {
             val infoCls = findClass("com.hihonor.controlviewnew.info.DeviceInfo")
             val bdCls = findClass("com.hihonor.controlviewnew.info.BatteryData")   // 双耳电量
             val typeCls = findClass("com.hihonor.controlcenter_aar.bean.HnDeviceProductType")
-            val thirdEar = typeCls.enumConstants?.firstOrNull { it.toString() == "Third_EarPhone" }
-                ?: typeCls.enumConstants?.firstOrNull()
+            // 类型名唯一取值点（可由 magicxm4_device_type 覆盖），顺便 dump 全表供真机选型
+            HonorDeviceTypeName.dumpOnce(typeCls.enumConstants)
+            val thirdEar = HonorDeviceTypeName.pick(typeCls.enumConstants)
             val ctor = infoCls.declaredConstructors.firstOrNull {
                 it.parameterCount == 7 && it.parameterTypes[0] == String::class.java
             }
@@ -453,8 +454,8 @@ object ControlCenterNoiseHook : HookContext() {
                 module.hook(sel).intercept { chain ->
                     val typeName = chain.args.getOrNull(0)?.toString()
                     val ret = chain.proceed()
-                    if (typeName == "Third_EarPhone" && ret !== remoteEar) {
-                        Log.w(TAG, "★ selectLayout(Third_EarPhone) $ret → REMOTE_EARPHONE")
+                    if (typeName == HonorDeviceTypeName.current() && ret !== remoteEar) {
+                        Log.w(TAG, "★ selectLayout($typeName) $ret → REMOTE_EARPHONE")
                         remoteEar
                     } else {
                         ret
@@ -517,8 +518,9 @@ object ControlCenterNoiseHook : HookContext() {
                 }.apply { isAccessible = true }
                 val ldCls = findClass("com.hihonor.controlcenter_aar.bean.LinkDevice")
                 val typeCls = findClass("com.hihonor.controlcenter_aar.bean.HnDeviceProductType")
-                val third = typeCls.enumConstants?.firstOrNull { it.toString() == "Third_EarPhone" }
-                    ?: throw IllegalStateException("Third_EarPhone 枚举不存在")
+                HonorDeviceTypeName.dumpOnce(typeCls.enumConstants)
+                val third = HonorDeviceTypeName.pick(typeCls.enumConstants)
+                    ?: throw IllegalStateException("HnDeviceProductType 枚举为空")
                 val ctor = ldCls.declaredConstructors.firstOrNull {
                     it.parameterCount == 7 && it.parameterTypes[0] == String::class.java
                 }?.apply { isAccessible = true }
@@ -822,8 +824,8 @@ object ControlCenterNoiseHook : HookContext() {
 
                 val ldCls = findClass("com.hihonor.controlcenter_aar.bean.LinkDevice")
                 val prodTypeCls = findClass("com.hihonor.controlcenter_aar.bean.HnDeviceProductType")
-                val thirdEarLd = prodTypeCls.enumConstants?.firstOrNull { it.toString() == "Third_EarPhone" }
-                    ?: prodTypeCls.enumConstants?.firstOrNull()
+                HonorDeviceTypeName.dumpOnce(prodTypeCls.enumConstants)
+                val thirdEarLd = HonorDeviceTypeName.pick(prodTypeCls.enumConstants)
                 // LinkDevice(String deviceId, String deviceName, HnDeviceProductType type,
                 //            String deviceNodeId, boolean isSelfDevice, List<HnOnlineType>, String prodId)
                 val ldCtor = ldCls.declaredConstructors.firstOrNull {

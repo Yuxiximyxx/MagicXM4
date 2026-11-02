@@ -84,16 +84,12 @@ private fun HomePage(context: Context) {
         Spacer(Modifier.height(4.dp))
 
         // ── 电量卡片 ──
-        val batteryRaw = remember {
-            try {
-                android.provider.Settings.Global.getString(context.contentResolver, "magicxm4_battery") ?: ""
-            } catch (_: Throwable) { "" }
-        }
-        val leftPct = if (batteryRaw.contains("L")) {
+        // WH-1000XM4 只有一颗总电量：优先读索尼协议解析出的单值，
+        // 没有时再退回欢律遗留的双耳字符串（兼容旧数据，不显示假的左右耳）。
+        val singlePct = remember { g(context, "magicxm4_battery_single")?.toIntOrNull() ?: -1 }
+        val batteryRaw = remember { g(context, "magicxm4_battery") ?: "" }
+        val leftPct = if (singlePct >= 0) singlePct else if (batteryRaw.contains("L")) {
             batteryRaw.substringAfter("L").substringBefore(",").toIntOrNull() ?: -1
-        } else -1
-        val rightPct = if (batteryRaw.contains("R")) {
-            batteryRaw.substringAfterLast("R").toIntOrNull() ?: -1
         } else -1
 
         Card(
@@ -107,22 +103,18 @@ private fun HomePage(context: Context) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    BatteryGauge("左耳", leftPct)
-                    BatteryGauge("右耳", rightPct)
+                    BatteryGauge("电量", leftPct)
                 }
             }
         }
 
         // ── 默认降噪档位（三档：实验性降噪 / 深度降噪 / 普通降噪）──
-        val ancOptions = listOf("实验性降噪", "深度降噪", "普通降噪")
-        val ancStatus = mapOf("实验性降噪" to "5", "深度降噪" to "4", "普通降噪" to "3")
-        val currentAnc = remember {
-            try {
-                android.provider.Settings.Global.getString(context.contentResolver, "magicxm4_last_anc") ?: "5"
-            } catch (_: Throwable) { "5" }
-        }
+        // XM4 只有三档语义（索尼没有「自适应降噪」），所以这里只给三档。
+        val ancOptions = listOf("关闭", "降噪", "通透")
+        val ancStatus = mapOf("关闭" to "1", "降噪" to "5", "通透" to "2")
+        val currentAnc = remember { g(context, "magicxm4_last_anc") ?: "5" }
         var selectedAnc by remember(currentAnc) {
-            mutableStateOf(ancOptions.find { ancStatus[it] == currentAnc } ?: "实验性降噪")
+            mutableStateOf(ancOptions.find { ancStatus[it] == currentAnc } ?: "降噪")
         }
 
         Card(
@@ -132,7 +124,7 @@ private fun HomePage(context: Context) {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text("默认降噪档位", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "进入降噪页面时自动选中",
+                    "连上耳机后自动恢复这一档",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -144,13 +136,7 @@ private fun HomePage(context: Context) {
                             .fillMaxWidth()
                             .clickable {
                                 selectedAnc = opt
-                                ancStatus[opt]?.let { status ->
-                                    runCatching {
-                                        android.provider.Settings.Global.putString(
-                                            context.contentResolver, "magicxm4_last_anc", status
-                                        )
-                                    }
-                                }
+                                ancStatus[opt]?.let { status -> writeDefaultAnc(context, status) }
                             }
                             .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -159,18 +145,107 @@ private fun HomePage(context: Context) {
                             selected = isSel,
                             onClick = {
                                 selectedAnc = opt
-                                ancStatus[opt]?.let { status ->
-                                    runCatching {
-                                        android.provider.Settings.Global.putString(
-                                            context.contentResolver, "magicxm4_last_anc", status
-                                        )
-                                    }
-                                }
+                                ancStatus[opt]?.let { status -> writeDefaultAnc(context, status) }
                             }
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(opt, style = MaterialTheme.typography.bodyLarge)
                     }
+                }
+            }
+        }
+
+        // ── 索尼协议调试（真机 A/B 用）──
+        // 这一版协议层没有真机验证，两个参考实现在「降噪设置载荷的下标 3/4」上冲突。
+        // 把它做成 App 里可切换，就是为了**不用重编 APK** 就能在手机上试出哪一个对。
+        var layoutSel by remember { mutableStateOf(g(context, "magicxm4_sony_layout") ?: "0") }
+        var ambient by remember {
+            mutableStateOf((g(context, "magicxm4_ambient_level") ?: "15").toIntOrNull() ?: 15)
+        }
+        val deviceType = remember { g(context, "magicxm4_device_type") ?: "Third_EarPhone" }
+        val hnTypes = remember { g(context, "magicxm4_diag_hn_types") }
+
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("索尼协议（真机 A/B）", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "降噪点了没反应时，先切下面的载荷布局再试一次",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                listOf("0" to "风噪能力布局（默认）", "1" to "旧 dualSingle 布局").forEach { (value, label) ->
+                    val isSel = layoutSel == value
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                layoutSel = value
+                                putGlobal(context, "magicxm4_sony_layout", value)
+                            }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = isSel,
+                            onClick = {
+                                layoutSel = value
+                                putGlobal(context, "magicxm4_sony_layout", value)
+                            }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(label, style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                Text("通透档环境声等级：$ambient / 20", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "索尼环境声有 1..20 档，荣耀「通透」没有档位概念，这里选一个默认值",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            ambient = (ambient - 1).coerceAtLeast(1)
+                            putGlobal(context, "magicxm4_ambient_level", ambient.toString())
+                        }
+                    ) { Text("−") }
+                    Spacer(Modifier.width(16.dp))
+                    Text("$ambient", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(16.dp))
+                    OutlinedButton(
+                        onClick = {
+                            ambient = (ambient + 1).coerceAtMost(20)
+                            putGlobal(context, "magicxm4_ambient_level", ambient.toString())
+                        }
+                    ) { Text("+") }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("荣耀设备类型：$deviceType", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "设备类型决定设备中心的球与卡片形态。默认 Third_EarPhone 是已验证能渲染的那一个；" +
+                        "想试头戴形态就 adb 改 magicxm4_device_type（候选名见下方枚举清单）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (hnTypes.isNullOrBlank()) {
+                    Text(
+                        "尚未探测到类型枚举（需要模块在 controlcenter 进程里跑过一次）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        "已探测到的类型枚举：$hnTypes",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
@@ -353,4 +428,28 @@ fun MagicXM4AppCompose() {
             }
         }
     }
+}
+
+/**
+ * 读跨进程 Settings.Global。UI 里读不到就返回 null，绝不因为一次读失败崩掉页面。
+ */
+private fun g(context: Context, key: String): String? =
+    runCatching { android.provider.Settings.Global.getString(context.contentResolver, key) }.getOrNull()
+
+/** 写跨进程 Settings.Global，失败静默（宿主进程可能没有写权限，那是另一层的事）。 */
+private fun putGlobal(context: Context, key: String, value: String) {
+    runCatching { android.provider.Settings.Global.putString(context.contentResolver, key, value) }
+}
+
+/**
+ * 写「默认降噪档位」。
+ *
+ * 模块里有两个记忆键，语义不同但都该一起更新，否则会出现「设了默认档却不生效」：
+ *  · `magicxm4_anc_last` —— RfcommController 每次用户切档时写，重连后 restoreAncIfAny 读它；
+ *  · `magicxm4_last_anc` —— 蓝牙设置页 hook 在面板就绪时读它兜底高亮。
+ * 历史上 UI 只写后者、控制器只写前者，两边永远各自为政。
+ */
+private fun writeDefaultAnc(context: Context, status: String) {
+    putGlobal(context, "magicxm4_anc_last", status)
+    putGlobal(context, "magicxm4_last_anc", status)
 }

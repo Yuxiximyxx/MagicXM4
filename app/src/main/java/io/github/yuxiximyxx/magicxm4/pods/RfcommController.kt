@@ -43,6 +43,8 @@ object RfcommController {
     private const val BATTERY_POLL_INTERVAL_MS = 30_000L
     private const val RFCOMM_CONNECT_TIMEOUT_MS = 30_000L
     private const val RFCOMM_READ_TIMEOUT_MS = 5_000L
+    /** 单条命令等 ACK 的上限。设备不回 ACK 时不至于把队列堵死。 */
+    private const val SONY_ACK_TIMEOUT_MS = 800
 
     /**
      * 索尼 SPP UUID（SonyHeadphonesClient Client/Constants.h:11 实证）。
@@ -84,6 +86,72 @@ object RfcommController {
     // ── 索尼协议状态 ────────────────────────────────────────────
     /** 出站序号：每发一条 +1；收到 ACK 后按设备的 seq 对齐（Gadgetbridge 的同款做法）。 */
     private val sonySeq = SonyCommands.SeqCounter(0)
+
+    /** INIT 应答是否已到（连上后设备进入可查询状态的信号）。 */
+    @Volatile
+    private var initAcked: Boolean = false
+
+    /** 原始线路帧诊断（含 3E/3C 与转义），排查「解帧是不是切歪了」的唯一证据。 */
+    private val sonyRawLines = ArrayDeque<String>()
+    private fun sonyRaw(line: String) {
+        synchronized(sonyRawLines) {
+            sonyRawLines.addLast(line)
+            while (sonyRawLines.size > 8) sonyRawLines.removeFirst()
+            writeGlobal("magicxm4_diag_raw", sonyRawLines.joinToString(" | "))
+        }
+    }
+
+    // ── 出站请求队列（ACK 门控）────────────────────────────────
+    // 2026-11-02 真机实证：连着把 `66 02`/`10 00`/`04 02` 三条查询发出去，
+    // 设备**一条都不回**（只推它自己的音量通知）。Gadgetbridge 的做法是
+    // 「发一条 → 等 ACK → 再发下一条」，这里照做：队列 + 单飞 + ACK/超时解锁。
+    private val sonyOutbound = java.util.concurrent.LinkedBlockingQueue<(Int) -> SonyWire.Message>()
+
+    @Volatile
+    private var awaitingAckSeq: Int = -1
+
+    @Volatile
+    private var sonyPumpStarted: Boolean = false
+
+    private fun startSonyPump() {
+        if (sonyPumpStarted) return
+        synchronized(this) {
+            if (sonyPumpStarted) return
+            sonyPumpStarted = true
+        }
+        scope.launch {
+            while (true) {
+                val build = try {
+                    sonyOutbound.take()
+                } catch (e: InterruptedException) {
+                    return@launch
+                }
+                if (!isConnected.get()) {
+                    // 断连时清空积压，避免重连后一次性倾泻过期命令
+                    sonyOutbound.clear()
+                    continue
+                }
+                val seq = sonySeq.next()
+                val msg = build(seq)
+                awaitingAckSeq = seq
+                val hex = SonyWire.hex(msg.payload)
+                Log.i(TAG, "TX seq=$seq payload=$hex")
+                sonyDiag("TX $seq:$hex")
+                sendPacketSafe(SonyWire.build(msg))
+                var waited = 0
+                while (awaitingAckSeq == seq && waited < SONY_ACK_TIMEOUT_MS && isConnected.get()) {
+                    delay(20)
+                    waited += 20
+                }
+                if (awaitingAckSeq == seq) {
+                    Log.w(TAG, "等 ACK 超时 seq=$seq（${SONY_ACK_TIMEOUT_MS}ms），继续下一条")
+                    sonyDiag("ACK-TIMEOUT $seq")
+                }
+                awaitingAckSeq = -1
+                delay(40)
+            }
+        }
+    }
 
     /**
      * 降噪/环境声设置载荷布局。
@@ -215,21 +283,50 @@ object RfcommController {
      * （Gadgetbridge 会发 `00 00`，但那是为了探测 V1/V2 协议版本，我们用不上）。
      * 少一步 = 少一个失败点，所以这里直接问三个状态：降噪 → 电量 → 固件。
      */
+    /**
+     * 连接后的初始化：**只发 INIT_REQUEST，等设备应答后再查询**。
+     *
+     * 为什么改成两段（2026-11-02 真机实证）：
+     * 一开始把 INIT 和三条查询连着发，结果 `66 02`（降噪）和 `10 00`（电量）**一条应答都没有**，
+     * 只收到设备主动推的音量通知 `A9 01 00`；而 INIT 的应答 `01 00 70 00`（V1）是在
+     * 十几秒后才迟到的。也就是说：设备在 INIT 完成前会静默丢掉其它命令。
+     * 所以这里发 INIT 后等应答，收到 [SonyEvent.Init] 才真正开始查询；
+     * 等不到就重发（最多 3 次），最后兜底直接查一次，避免彻底不刷状态。
+     */
     private fun sonyInit() {
         scope.launch {
             try {
                 delay(300)
                 loadSonyPrefs()
-                sendSony { SonyCommands.queryNoiseState(it) }
-                delay(200); sendSony { SonyCommands.batteryRequest(it) }
-                delay(200); sendSony { SonyCommands.firmwareRequest(it) }
-                delay(300); sendSony { SonyCommands.queryNoiseState(it) }
+                initAcked = false
+                for (attempt in 1..3) {
+                    if (!isConnected.get()) return@launch
+                    if (initAcked) break
+                    Log.i(TAG, "发 INIT_REQUEST（第 $attempt 次）")
+                    sendSony { SonyCommands.initRequest(it) }
+                    delay(1200)
+                }
+                if (!initAcked) {
+                    Log.w(TAG, "INIT 未获应答，仍然直接查询（可能设备已就绪但没回 INIT）")
+                }
+                sendQueries()
                 // 记忆式 ANC：连上后恢复上次用户选择的档位
                 runCatching { restoreAncIfAny() }
-                Log.i(TAG, "索尼初始化查询已下发（layout=$sonyLayout ambientLevel=$ambientLevel）")
+                Log.i(TAG, "索尼初始化完成（layout=$sonyLayout ambientLevel=$ambientLevel initAcked=$initAcked）")
             } catch (e: Throwable) {
                 Log.e(TAG, "sonyInit failed", e)
             }
+        }
+    }
+
+    /** 三条状态查询：降噪 → 电量 → 固件。INIT 应答到达后调用。 */
+    private fun sendQueries() {
+        scope.launch {
+            runCatching {
+                sendSony { SonyCommands.queryNoiseState(it) }
+                delay(250); sendSony { SonyCommands.batteryRequest(it) }
+                delay(250); sendSony { SonyCommands.firmwareRequest(it) }
+            }.onFailure { Log.w(TAG, "sendQueries failed", it) }
         }
     }
 
@@ -435,6 +532,7 @@ object RfcommController {
                 if (bytesRead > 0) {
                     val frames = framer.append(buffer, bytesRead)
                     for (frame in frames) {
+                        sonyRaw("RX ${SonyWire.hex(frame)}")
                         runCatching { SonyWire.parse(frame)?.let { handleSonyPacket(it) } }
                             .onFailure { Log.w(TAG, "sony packet handle failed", it) }
                     }
@@ -463,8 +561,10 @@ object RfcommController {
                 "RX type=0x%02X seq=0x%02X payload=%s".format(msg.type, msg.seq, SonyWire.hex(msg.payload))
             )
         }
+        sonyDiag("RX ${msg.seq}:${SonyWire.hex(msg.payload)}")
         when (val event = SonyParser.parse(msg)) {
             is SonyEvent.Ack -> {
+                if (event.seq == awaitingAckSeq) awaitingAckSeq = -1
                 // 设备确认了某条请求。把序号计数器对齐到「它的下一位」，
                 // 否则长连接里两边各走各的、迟早错开（Gadgetbridge 同款处理）。
                 sonySeq.adopt((event.seq + 1) and 0xFF)
@@ -478,6 +578,18 @@ object RfcommController {
             is SonyEvent.Firmware -> {
                 writeGlobal("magicxm4_firmware", event.version)
                 Log.i(TAG, "固件版本: ${event.version}")
+            }
+
+            is SonyEvent.Init -> {
+                initAcked = true
+                writeGlobal("magicxm4_sony_proto", "V${event.version}")
+                Log.i(TAG, "INIT 应答收到：协议 V${event.version}（${SonyWire.hex(event.raw)}）→ 开始查询")
+                sendQueries()
+            }
+
+            is SonyEvent.Ignored -> {
+                // 音量通知之类：已知、不消费，不刷日志（XM4 每秒推一条）。
+                if (BuildConfig.DEBUG) Log.v(TAG, "忽略：${event.reason} hex=${SonyWire.hex(event.raw)}")
             }
 
             is SonyEvent.Unknown -> {
@@ -744,6 +856,21 @@ object RfcommController {
         }.onFailure { Log.w(TAG, "saveBattery failed", it) }
     }
 
+    // ── 索尼协议诊断环 ─────────────────────────────────────────
+    // 为什么需要：模块自己的日志要 logLevel>=BASIC 才输出，DEBUG 才打收发十六进制；
+    // 而真机联调时最需要的就是「发了什么、回了什么」。这里把最近 16 条收发无条件
+    // 写进 Settings.Global["magicxm4_diag_sony"]，`adb shell settings get` 就能看，
+    // 不依赖日志级别、不依赖 root。
+    private val sonyDiagLines = ArrayDeque<String>()
+
+    private fun sonyDiag(line: String) {
+        synchronized(sonyDiagLines) {
+            sonyDiagLines.addLast(line)
+            while (sonyDiagLines.size > 16) sonyDiagLines.removeFirst()
+            writeGlobal("magicxm4_diag_sony", sonyDiagLines.joinToString(" | "))
+        }
+    }
+
     /**
      * 发一条索尼协议消息。
      *
@@ -752,11 +879,8 @@ object RfcommController {
      */
     private fun sendSony(build: (Int) -> SonyWire.Message) {
         ensureLink()
-        val msg = build(sonySeq.next())
-        if (BuildConfig.DEBUG) {
-            Log.v(TAG, "TX type=${msg.type} seq=${msg.seq} payload=${SonyWire.hex(msg.payload)}")
-        }
-        sendPacketSafe(SonyWire.build(msg))
+        startSonyPump()
+        sonyOutbound.offer(build)
     }
 
     private fun sendPacketSafe(packet: ByteArray) {
