@@ -611,6 +611,13 @@ object ControlCenterNoiseHook : HookContext() {
                     runCatching {
                         val v = chain.thisObject as? android.view.ViewGroup
                         if (v != null && v.childCount > 0) {
+                            // 球先出现 → 立刻换球图标（用户抱怨「点进去再退出才变头戴」就是缺这一步）
+                            val ballName = findByIdName(v, "device_ball_name") as? android.widget.TextView
+                            if (ballName?.text?.toString()?.trim() == OUR_NAME) {
+                                listOf(0L, 120L, 400L, 1000L).forEach { d ->
+                                    v.postDelayed({ runCatching { fixBallIcon(v.rootView) } }, d)
+                                }
+                            }
                             val nameView = findByIdName(v, "device_name") as? android.widget.TextView
                             if (nameView?.text?.toString()?.trim() == OUR_NAME) {
                                 val online = isOurConnected()
@@ -1155,14 +1162,19 @@ object ControlCenterNoiseHook : HookContext() {
                     val cardView = cardRet as? android.view.View
                     if (cardView != null) {
                         val realOnline = isOurConnected()
-                        listOf(0L, 200L, 600L, 1400L).forEach { d ->
-                            cardView.postDelayed({
-                                runCatching {
-                                    cleanupCard(cardView)
-                                    applyOfflineVisibility(cardView, realOnline)
-                                }
-                            }, d)
+                        // ★ 先同步收一次：createDeviceServiceCard 返回时子 View 已经 inflate 完，
+                        //   此处在 attach/layout 之前把该藏的直接 GONE，卡片就不会「先撑大再缩回去」。
+                        runCatching {
+                            cleanupCard(cardView)
+                            applyOfflineVisibility(cardView, realOnline)
                         }
+                        // 再补一次延迟扫描，兜住少数晚挂载的子 View（只一次，避免多次抖动）
+                        cardView.postDelayed({
+                            runCatching {
+                                cleanupCard(cardView)
+                                applyOfflineVisibility(cardView, realOnline)
+                            }
+                        }, 400L)
                     }
                 }
                 cardRet
@@ -1622,9 +1634,14 @@ object ControlCenterNoiseHook : HookContext() {
      * 之后再没人调用 setImageDrawable，hook 永远等不到。直接改视图树最稳。
      */
     private fun fixBallIcon(root: android.view.View) {
-        val ids = listOf("icon_image_view", "device_icon")
-            .map { root.resources.getIdentifier(it, "id", "com.hihonor.controlcenter") }
-            .filter { it != 0 }
+        // 球图标和卡片头部图标的原图尺寸/显示比例不一样：
+        //   球（icon_image_view）：原图 84×84，宿主按约 1.35 倍画
+        //   卡片（device_icon）  ：原图就是最终尺寸，放大反而溢出
+        val iconScales = linkedMapOf(
+            root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") to 1.35f,
+            root.resources.getIdentifier("device_icon", "id", "com.hihonor.controlcenter") to 1.0f,
+        ).filterKeys { it != 0 }
+        val ids = iconScales.keys
         if (ids.isEmpty()) {
             diag("icon", "id=0")
             return
@@ -1636,7 +1653,27 @@ object ControlCenterNoiseHook : HookContext() {
             val v = stack.removeLast()
             if (v.id in ids && v is android.widget.ImageView && belongsToOurBall(v)) {
                 val d = ourHeadphoneDrawable()
-                if (d != null) { v.setImageDrawable(d); hit++ }
+                if (d != null) {
+                    // ★ 尺寸：自绘矢量是 24dp，而宿主那张图是按球的尺寸给的（实测明显更大）。
+                    //   直接 setImageDrawable 会按 intrinsic 尺寸画 → 图标变小。
+                    //   这里沿用「被替换掉的那张图」的实际尺寸；拿不到就退回 View 自身的尺寸。
+                    val old = v.drawable
+                    val oldW = old?.intrinsicWidth ?: 0
+                    val oldH = old?.intrinsicHeight ?: 0
+                    // 取「原图尺寸」和「View 尺寸」里更大的那个：宿主的耳塞图是张大图，
+                    // 按 intrinsic 画就只剩一半大（实测结果）。用 View 尺寸能铺满同样的格子。
+                    // 实测：原图 intrinsic 84×84，但宿主按约 1.35 倍画（耳塞看着比 84 大）；
+                    // 而 View 尺寸 213 是整个球格子，直接用它会把图标撑到盖住文字。
+                    // 所以按「原图 intrinsic × 系数」画，系数可用 magicxm4_icon_scale 调。
+                    val scale = readGlobal("magicxm4_icon_scale")?.toFloatOrNull()
+                        ?: iconScales[v.id] ?: 1.0f
+                    val w = if (oldW > 0) (oldW * scale).toInt() else v.width
+                    val h = if (oldH > 0) (oldH * scale).toInt() else v.height
+                    v.setImageDrawable(d)
+                    if (w > 0 && h > 0) d.setBounds(0, 0, w, h)
+                    diag("icon_size", "old=${oldW}x${oldH} view=${v.width}x${v.height} scale=$scale set=${w}x$h")
+                    hit++
+                }
             }
             if (v is android.view.ViewGroup) {
                 for (i in 0 until v.childCount) stack.addLast(v.getChildAt(i))
