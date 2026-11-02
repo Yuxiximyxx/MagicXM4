@@ -425,6 +425,12 @@ object ControlCenterNoiseHook : HookContext() {
                             if (isOurMac(id?.toString())) {
                                 diag("ball", "id=$id ok=${ret != null} prod=${ourProd()}")
                             }
+                            // ★ 换头戴图标：荣耀按 prodId 查自己的图标表，借用的机型码没有图标
+                            //   就回落成耳塞。这里在球建好后直接把图标换成我们自绘的头戴图标。
+                            if (isOurMac(id?.toString()) && ret is android.view.View) {
+                                runCatching { replaceBallIcon(ret) }
+                                    .onFailure { Log.w(TAG, "换头戴图标失败: ${it.javaClass.simpleName}: ${it.message}") }
+                            }
                             if (isOurMac(id?.toString()) && (ret == null || isVerboseDump())) {
                                 dumpFields("createDeviceBall.args[0]", info)
                                 runCatching { ret?.let { dumpFields("createDeviceBall.ret", it) } }
@@ -604,7 +610,7 @@ object ControlCenterNoiseHook : HookContext() {
                             listOf(0L, 300L, 900L, 2000L).forEach { d ->
                                 self.postDelayed({ cleanupCard(self.rootView) }, d)
                                 self.postDelayed(
-                                    { applyNoiseSectionVisibility(self.rootView, real) }, d
+                                    { applyOfflineVisibility(self.rootView, real) }, d
                                 )
                             }
                         } else {
@@ -1503,6 +1509,76 @@ object ControlCenterNoiseHook : HookContext() {
         val target = if (section === scope) title else section
         target.visibility = if (online) android.view.View.VISIBLE else android.view.View.GONE
         diag("noise_sec", "online=$online -> ${if (online) "VISIBLE" else "GONE"}")
+    }
+
+    /**
+     * 把设备球上的默认耳塞图标换成我们自绘的头戴图标。
+     *
+     * 图标 id `icon_image_view` 是从真机 dump 出来的（DeviceBallView → … → HwImageView#icon_image_view）。
+     * 用 createPackageContext 拿模块自己的资源，避免依赖宿主资源表里有没有这张图。
+     */
+    private fun replaceBallIcon(ball: android.view.View) {
+        val ctx = currentApp() ?: return
+        val id = ball.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
+        if (id == 0) return
+        val icon = ball.findViewById<android.view.View>(id) as? android.widget.ImageView ?: return
+        val moduleCtx = ctx.createPackageContext(
+            "io.github.yuxiximyxx.magicxm4", android.content.Context.CONTEXT_IGNORE_SECURITY
+        )
+        val drawable = moduleCtx.resources.getDrawable(
+            io.github.yuxiximyxx.magicxm4.R.drawable.ic_headphone, null
+        )
+        icon.setImageDrawable(drawable)
+        diag("icon", "已换成头戴图标")
+    }
+
+    /**
+     * 断连时按原生华为耳机的样子收缩卡片：**不显示电量、不显示噪声控制**。
+     *
+     * 电量段的标题 `earphone_battery_title` 文案是空的，所以按 id 找；
+     * 噪声控制段按文案找。两处都要求「所在子树里有我方设备名、没有别的设备名」，
+     * 避免误伤同时挂着的 OPPO/华为卡片。
+     */
+    private fun applyOfflineVisibility(root: android.view.View?, online: Boolean) {
+        if (root == null) return
+        var changed = 0
+
+        findByIdName(root, "earphone_battery_title")?.let { title ->
+            if (belongsToUs(title)) {
+                (title.parent as? android.view.View)?.let { section ->
+                    val want = if (online) android.view.View.VISIBLE else android.view.View.GONE
+                    if (section.visibility != want) { section.visibility = want; changed++ }
+                }
+            }
+        }
+
+        findTextView(root, "噪声控制")?.let { title ->
+            if (belongsToUs(title)) {
+                (title.parent as? android.view.View)?.let { section ->
+                    val want = if (online) android.view.View.VISIBLE else android.view.View.GONE
+                    if (section.visibility != want) { section.visibility = want; changed++ }
+                }
+            }
+        }
+
+        if (changed > 0) diag("offline", "online=$online 调整 $changed 段")
+    }
+
+    /** 这个节点所在的卡片是不是我们的（子树里有我方设备名、且没有别的设备名）。 */
+    private fun belongsToUs(node: android.view.View): Boolean =
+        ancestorContainingAlso(node, OUR_NAME, OTHER_DEVICE_NAMES) != null
+
+    /** 按资源 id 名在整个窗口里找 View（id 是宿主的，所以只能用名字查）。 */
+    private fun findByIdName(root: android.view.View, name: String): android.view.View? {
+        val target = root.resources.getIdentifier(name, "id", "com.hihonor.controlcenter")
+        if (target == 0) return null
+        if (root.id == target) return root
+        if (root is android.view.ViewGroup) {
+            for (i in 0 until root.childCount) {
+                findByIdName(root.getChildAt(i), name)?.let { return it }
+            }
+        }
+        return null
     }
 
     private fun cleanupCard(root: android.view.View?) {
