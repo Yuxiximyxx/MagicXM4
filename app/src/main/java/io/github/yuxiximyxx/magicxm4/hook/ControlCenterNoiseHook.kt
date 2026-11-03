@@ -507,6 +507,7 @@ object ControlCenterNoiseHook : HookContext() {
                     val ret = chain.proceed()
                     val size = (ret as? List<*>)?.size
                     Log.w(TAG, "▶ createSections(config=$config) → size=$size")
+                    diag("sections", "size=$size cls=" + (ret as? List<*>)?.joinToString(",") { it?.javaClass?.simpleName ?: "null" })
                     // 卡片装配完成 → 延迟几次把离线收缩 + 图标替换跑一遍。
                     // 断连时 updateEarphoneUIByOnlineType 不一定会触发，这里是唯一稳定的时机。
                     runCatching {
@@ -661,7 +662,19 @@ object ControlCenterNoiseHook : HookContext() {
                     }
                     chain.proceed()
                 }
-                Log.i(TAG, "installed: ImageView.setImageDrawable [球图标替换]")
+                // 宿主也可能走 setImageResource(int)——实测真正的入口就是它，
+                // 所以 setImageDrawable 那条一次都没命中。
+                val resMethod = android.widget.ImageView::class.java
+                    .getMethod("setImageResource", Int::class.javaPrimitiveType)
+                module.hook(resMethod).intercept { chain ->
+                    val ret = chain.proceed()
+                    runCatching {
+                        val view = chain.thisObject as? android.widget.ImageView
+                        if (view != null) maybeReplaceIcon(view)
+                    }
+                    ret
+                }
+                Log.i(TAG, "installed: ImageView.setImageDrawable/setImageResource [球图标替换]")
             }.onFailure {
                 Log.w(TAG, "球图标 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
                 diag("icon", "hook fail: ${it.message}")
@@ -692,7 +705,13 @@ object ControlCenterNoiseHook : HookContext() {
                     runCatching {
                         val self = chain.thisObject as? android.view.View
                         if (self != null) {
-                            if (findTextView(self, OUR_NAME) != null) ourBallRef = java.lang.ref.WeakReference(self)
+                            if (findTextView(self, OUR_NAME) != null) {
+                                ourBallRef = java.lang.ref.WeakReference(self)
+                                // 宿主刷新球状态时会重设图标 → 这里补一次，避免「放一会儿又变回耳塞」
+                                listOf(0L, 150L, 500L).forEach { d ->
+                                    self.postDelayed({ runCatching { fixBallIcon(self.rootView) } }, d)
+                                }
+                            }
                             listOf(0L, 300L, 900L, 2000L).forEach { d ->
                                 self.postDelayed({ cleanupCard(self.rootView) }, d)
                                 self.postDelayed(
@@ -1162,11 +1181,23 @@ object ControlCenterNoiseHook : HookContext() {
                     val cardView = cardRet as? android.view.View
                     if (cardView != null) {
                         val realOnline = isOurConnected()
-                        // ★ 先同步收一次：createDeviceServiceCard 返回时子 View 已经 inflate 完，
-                        //   此处在 attach/layout 之前把该藏的直接 GONE，卡片就不会「先撑大再缩回去」。
-                        runCatching {
+                        // ★ 消除「先闪一下完整卡片」：
+                        //   即使同步改 GONE，宿主仍会先按旧状态播一次展开动画（实测能看到
+                        //   「已连接卡片 → 未连接卡片」的跳变）。这里让卡片先透明一帧，
+                        //   等第一次清理落地后再显示 —— 用户看到的就是直接展开成正确的样子。
+                        runCatching { cardView.alpha = 0f }
+                        try {
                             cleanupCard(cardView)
                             applyOfflineVisibility(cardView, realOnline)
+                        } finally {
+                            // 下一帧恢复（post 到自己的 handler，保证在首次 layout 之后）
+                            cardView.post {
+                                cardView.alpha = 1f
+                                runCatching {
+                                    cleanupCard(cardView)
+                                    applyOfflineVisibility(cardView, realOnline)
+                                }
+                            }
                         }
                         // 再补一次延迟扫描，兜住少数晚挂载的子 View（只一次，避免多次抖动）
                         cardView.postDelayed({
@@ -1638,7 +1669,7 @@ object ControlCenterNoiseHook : HookContext() {
         //   球（icon_image_view）：原图 84×84，宿主按约 1.35 倍画
         //   卡片（device_icon）  ：原图就是最终尺寸，放大反而溢出
         val iconScales = linkedMapOf(
-            root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") to 1.35f,
+            root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") to 1.6f,
             root.resources.getIdentifier("device_icon", "id", "com.hihonor.controlcenter") to 1.0f,
         ).filterKeys { it != 0 }
         val ids = iconScales.keys
@@ -1796,6 +1827,33 @@ object ControlCenterNoiseHook : HookContext() {
             }
         }
         return null
+    }
+
+    /** 这张图标的 id 是否属于我们关心的两个位置（球 / 卡片头部）。 */
+    private fun iconScaleOf(view: android.view.View): Float? {
+        val res = view.resources
+        val ballId = res.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
+        val cardId = res.getIdentifier("device_icon", "id", "com.hihonor.controlcenter")
+        return when (view.id) {
+            ballId -> 1.6f
+            cardId -> 1.0f
+            else -> null
+        }
+    }
+
+    /** 单个 ImageView 的替换（hook 与树遍历共用）。 */
+    private fun maybeReplaceIcon(view: android.widget.ImageView) {
+        val scale = iconScaleOf(view) ?: return
+        if (!belongsToOurBall(view)) return
+        val d = ourHeadphoneDrawable() ?: return
+        val old = view.drawable
+        val oldW = old?.intrinsicWidth ?: 0
+        val oldH = old?.intrinsicHeight ?: 0
+        val k = readGlobal("magicxm4_icon_scale")?.toFloatOrNull() ?: scale
+        val w = if (oldW > 0) (oldW * k).toInt() else view.width
+        val h = if (oldH > 0) (oldH * k).toInt() else view.height
+        view.setImageDrawable(d)
+        if (w > 0 && h > 0) d.setBounds(0, 0, w, h)
     }
 
     private fun cleanupCard(root: android.view.View?) {
