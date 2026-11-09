@@ -45,6 +45,16 @@ object SystemUIHeadsetIconHook : HookContext() {
         val rs = if (r != null && r >= 0) "右耳 $r%" else "右耳 --%"
         "$ls $rs"
     }.getOrDefault("左耳 --% 右耳 --%")
+
+    /**
+     * ★ 3.0.8 连接门控：文案改写只在 XM4 本人是当前已连接的 A2DP 设备时才许动。
+     * 信号 = 本 hook 在 SystemUI 进程内维护的 connectedAddresses —— 由 A2DP
+     * 连接广播 + 开机回补枚举喂入，每条都过 HeadsetStateDispatcher.isOriGPod
+     * （按设备名/别名认定 WH-1000XM4 本人），与状态栏图标显隐共用同一份状态，
+     * 不新增跨进程键。没有这道门时，XM4 没连接也会把音频通知的占位标题盖成
+     * WH-1000XM4，抢掉同时在跑的 MagicPods（Free4）那条通知（2026-11-10 A/B 实锤）。
+     */
+    private fun isXm4Connected(): Boolean = connectedAddresses.isNotEmpty()
     private const val SLOT = "wireless_headset"
     private const val MAX_RECONNECT_ATTEMPTS = 3
 
@@ -78,7 +88,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                 m.isAccessible = true
                 module.hook(m).intercept { chain ->
                     val ret = chain.proceed()
-                    if (ret is android.view.View) {
+                    if (ret is android.view.View && isXm4Connected()) {
                         var changed = 0
                         fun walk(v: android.view.View) {
                             if (v is android.widget.TextView) {
@@ -114,7 +124,7 @@ object SystemUIHeadsetIconHook : HookContext() {
             }.apply { isAccessible = true }
             module.hook(m).intercept { chain ->
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()
-                if (t == "当前音频输入输出设备" || t == "WH-1000XM4") {
+                if (isXm4Connected() && (t == "当前音频输入输出设备" || t == "WH-1000XM4")) {
                     val out = if (t == "当前音频输入输出设备") "WH-1000XM4" else readBatteryLine()
                     Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → '$out'")
                     val newArgs = chain.args.toTypedArray()

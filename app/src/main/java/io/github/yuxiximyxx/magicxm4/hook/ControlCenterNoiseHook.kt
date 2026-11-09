@@ -641,44 +641,11 @@ object ControlCenterNoiseHook : HookContext() {
                 Log.w(TAG, "onAttachedToWindow hook 失败: ${it.javaClass.simpleName}: ${it.message}")
             }
 
-            // ── 11h) ★ 设备球图标：换成自绘头戴图标 ──
-            //   球图标是荣耀按 prodId 查自己图标表拿到的，我们借用的机型码没有图标 → 默认耳塞。
-            //   这里 hook ImageView 的两个设置入口：只有当被设置的正是球图标（id=icon_image_view）
-            //   并且它所属的那个球显示的是 WH-1000XM4 时才替换，别的设备一个都不碰。
-            runCatching {
-                val iconId = currentApp()?.resources
-                    ?.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") ?: 0
-                if (iconId == 0) throw IllegalStateException("icon_image_view id 未找到")
-                val drawableMethod = android.widget.ImageView::class.java
-                    .getMethod("setImageDrawable", android.graphics.drawable.Drawable::class.java)
-                module.hook(drawableMethod).intercept { chain ->
-                    val view = chain.thisObject as? android.widget.ImageView
-                    if (view != null && view.id == iconId && belongsToOurBall(view)) {
-                        val replaced = ourHeadphoneDrawable()
-                        if (replaced != null) {
-                            diag("icon", "setImageDrawable → 头戴图标")
-                            return@intercept replaced.let { chain.args[0] = it; chain.proceed() }
-                        }
-                    }
-                    chain.proceed()
-                }
-                // 宿主也可能走 setImageResource(int)——实测真正的入口就是它，
-                // 所以 setImageDrawable 那条一次都没命中。
-                val resMethod = android.widget.ImageView::class.java
-                    .getMethod("setImageResource", Int::class.javaPrimitiveType)
-                module.hook(resMethod).intercept { chain ->
-                    val ret = chain.proceed()
-                    runCatching {
-                        val view = chain.thisObject as? android.widget.ImageView
-                        if (view != null) maybeReplaceIcon(view)
-                    }
-                    ret
-                }
-                Log.i(TAG, "installed: ImageView.setImageDrawable/setImageResource [球图标替换]")
-            }.onFailure {
-                Log.w(TAG, "球图标 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
-                diag("icon", "hook fail: ${it.message}")
-            }
+            // ── 11h) 【3.0.8 已拆除】设备球图标的自绘替换 ──
+            //   原先 hook ImageView.setImageDrawable/setImageResource 把球图标换成模块
+            //   自绘的 ic_headphone 矢量图，大小/位置/动画都与宿主原生对不上。3.0.8 起
+            //   球图标改由 fixBallIcon 在视图树上换成宿主自带的 device_icon_default_earphone
+            //   （原生头戴位图），此处不再拦截任何 ImageView 设置入口。
 
             // ── 11c) ★ FIX-005：让「响铃查找」可点 ──
             //   DeviceServiceCardAdapter.updateEarphoneUIByOnlineType(boolean) 会按在线态
@@ -1653,64 +1620,62 @@ object ControlCenterNoiseHook : HookContext() {
     }
 
     /**
-     * 把设备球上的默认耳塞图标换成我们自绘的头戴图标。
+     * ★ 3.0.8：球图标改走宿主原生头戴图，弃用自绘矢量（ic_headphone 已删）。
      *
-     * 图标 id `icon_image_view` 是从真机 dump 出来的（DeviceBallView → … → HwImageView#icon_image_view）。
-     * 用 createPackageContext 拿模块自己的资源，避免依赖宿主资源表里有没有这张图。
-     */
-    /**
-     * 在当前窗口子树里找 `icon_image_view`，凡是属于我们那颗球的，换成头戴图标。
+     * 以前为什么不对：自绘的是 24dp 矢量，塞进球位后靠手算 setBounds
+     * （intrinsic × 1.6 之类）硬撑尺寸——大小、锚点、宿主给原生图的
+     * 入场/刷新动画全对不上，球和展开卡片都别扭。
      *
-     * 为什么按树找而不是挂 hook：球的图标可能在模块 hook 装好之前就已经设过一次，
-     * 之后再没人调用 setImageDrawable，hook 永远等不到。直接改视图树最稳。
+     * 宿主自己的图（MagicPods v2.10.7/2.10.8 在同机构建上实证）：
+     *   - 展开卡片卡头（device_icon）：原生就是 device_icon_default_earphone
+     *     （504×504 位图，画的正是头戴式）→ 本模块什么都不用做，
+     *     撤掉原先对 device_icon 的覆盖即为原生效果。
+     *   - 设备球（BasicDeviceBallView.initIcon）：对 Third 类设备在
+     *     default / in_ear / semi_in_ear 三张里挑，挑中的是耳塞家族图 →
+     *     XM4 是头戴，这里只把属于我们那颗球的 icon_image_view 换成宿主
+     *     自己的 device_icon_default_earphone：同为宿主位图、按
+     *     ConstantState 判定、不碰 bounds/scale，尺寸/位置/动画与宿主
+     *     原生头戴设备完全一致。
+     *   ConstantState 已命中 default 的直接跳过 → 只有宿主刷新把图重设回
+     *   耳塞图时才再换，平时不反复 setImageDrawable 打断动画。
+     *
+     * 为什么按树找而不是挂 hook：球的图标可能在模块 hook 装好之前就已经
+     * 设过一次，之后再没人调用 setImageDrawable，hook 永远等不到。
+     * 直接改视图树最稳（沿用原触发时机：挂载/在线态刷新/卡片清理时调用）。
      */
     private fun fixBallIcon(root: android.view.View) {
-        // 球图标和卡片头部图标的原图尺寸/显示比例不一样：
-        //   球（icon_image_view）：原图 84×84，宿主按约 1.35 倍画
-        //   卡片（device_icon）  ：原图就是最终尺寸，放大反而溢出
-        val iconScales = linkedMapOf(
-            root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter") to 1.6f,
-            root.resources.getIdentifier("device_icon", "id", "com.hihonor.controlcenter") to 1.0f,
-        ).filterKeys { it != 0 }
-        val ids = iconScales.keys
-        if (ids.isEmpty()) {
+        val ballId = root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
+        if (ballId == 0) {
             diag("icon", "id=0")
             return
         }
+        val res = root.resources
+        val defId = res.getIdentifier("device_icon_default_earphone", "drawable", "com.hihonor.controlcenter")
+        if (defId == 0) {
+            diag("icon", "device_icon_default_earphone 未找到")
+            return
+        }
+        val defCs = runCatching { res.getDrawable(defId, null)?.constantState }.getOrNull()
         var hit = 0
         val stack = ArrayDeque<android.view.View>()
         stack.addLast(root)
         while (stack.isNotEmpty()) {
             val v = stack.removeLast()
-            if (v.id in ids && v is android.widget.ImageView && belongsToOurBall(v)) {
-                val d = ourHeadphoneDrawable()
-                if (d != null) {
-                    // ★ 尺寸：自绘矢量是 24dp，而宿主那张图是按球的尺寸给的（实测明显更大）。
-                    //   直接 setImageDrawable 会按 intrinsic 尺寸画 → 图标变小。
-                    //   这里沿用「被替换掉的那张图」的实际尺寸；拿不到就退回 View 自身的尺寸。
-                    val old = v.drawable
-                    val oldW = old?.intrinsicWidth ?: 0
-                    val oldH = old?.intrinsicHeight ?: 0
-                    // 取「原图尺寸」和「View 尺寸」里更大的那个：宿主的耳塞图是张大图，
-                    // 按 intrinsic 画就只剩一半大（实测结果）。用 View 尺寸能铺满同样的格子。
-                    // 实测：原图 intrinsic 84×84，但宿主按约 1.35 倍画（耳塞看着比 84 大）；
-                    // 而 View 尺寸 213 是整个球格子，直接用它会把图标撑到盖住文字。
-                    // 所以按「原图 intrinsic × 系数」画，系数可用 magicxm4_icon_scale 调。
-                    val scale = readGlobal("magicxm4_icon_scale")?.toFloatOrNull()
-                        ?: iconScales[v.id] ?: 1.0f
-                    val w = if (oldW > 0) (oldW * scale).toInt() else v.width
-                    val h = if (oldH > 0) (oldH * scale).toInt() else v.height
-                    v.setImageDrawable(d)
-                    if (w > 0 && h > 0) d.setBounds(0, 0, w, h)
-                    diag("icon_size", "old=${oldW}x${oldH} view=${v.width}x${v.height} scale=$scale set=${w}x$h")
-                    hit++
+            if (v.id == ballId && v is android.widget.ImageView && belongsToOurBall(v)) {
+                val cs = runCatching { v.drawable?.constantState }.getOrNull()
+                if (defCs == null || (cs !== defCs && cs != defCs)) {
+                    val nd = runCatching { res.getDrawable(defId, null) }.getOrNull()
+                    if (nd != null) {
+                        v.setImageDrawable(nd)
+                        hit++
+                    }
                 }
             }
             if (v is android.view.ViewGroup) {
                 for (i in 0 until v.childCount) stack.addLast(v.getChildAt(i))
             }
         }
-        if (hit > 0) diag("icon", "已替换 $hit 个头戴图标")
+        if (hit > 0) diag("icon", "球图标已换宿主原生头戴图 $hit 处")
     }
 
     /** 从图标 View 往上找，看这个球的名字是不是我们的设备名。 */
@@ -1731,45 +1696,6 @@ object ControlCenterNoiseHook : HookContext() {
             depth++
         }
         return false
-    }
-
-    /** 取模块自己 APK 里的头戴图标（不依赖宿主资源表）。 */
-    private fun ourHeadphoneDrawable(): android.graphics.drawable.Drawable? = runCatching {
-        val ctx = currentApp() ?: return null
-        val moduleCtx = ctx.createPackageContext(
-            "io.github.yuxiximyxx.magicxm4", android.content.Context.CONTEXT_IGNORE_SECURITY
-        )
-        moduleCtx.resources.getDrawable(io.github.yuxiximyxx.magicxm4.R.drawable.ic_headphone, null)
-    }.getOrNull()
-
-    private fun replaceBallIcon(ball: Any?) {
-        val view = ball as? android.view.View
-        if (view == null) {
-            diag("icon", "不是 View: ${ball?.javaClass?.name}")
-            return
-        }
-        val ctx = currentApp() ?: run {
-            diag("icon", "ctx=null")
-            return
-        }
-        val id = view.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
-        if (id == 0) {
-            diag("icon", "id icon_image_view = 0")
-            return
-        }
-        val icon = view.findViewById<android.view.View>(id) as? android.widget.ImageView
-        if (icon == null) {
-            diag("icon", "findViewById 未命中（id=$id）")
-            return
-        }
-        val moduleCtx = ctx.createPackageContext(
-            "io.github.yuxiximyxx.magicxm4", android.content.Context.CONTEXT_IGNORE_SECURITY
-        )
-        val drawable = moduleCtx.resources.getDrawable(
-            io.github.yuxiximyxx.magicxm4.R.drawable.ic_headphone, null
-        )
-        icon.setImageDrawable(drawable)
-        diag("icon", "已换成头戴图标")
     }
 
     /**
@@ -1827,33 +1753,6 @@ object ControlCenterNoiseHook : HookContext() {
             }
         }
         return null
-    }
-
-    /** 这张图标的 id 是否属于我们关心的两个位置（球 / 卡片头部）。 */
-    private fun iconScaleOf(view: android.view.View): Float? {
-        val res = view.resources
-        val ballId = res.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
-        val cardId = res.getIdentifier("device_icon", "id", "com.hihonor.controlcenter")
-        return when (view.id) {
-            ballId -> 1.6f
-            cardId -> 1.0f
-            else -> null
-        }
-    }
-
-    /** 单个 ImageView 的替换（hook 与树遍历共用）。 */
-    private fun maybeReplaceIcon(view: android.widget.ImageView) {
-        val scale = iconScaleOf(view) ?: return
-        if (!belongsToOurBall(view)) return
-        val d = ourHeadphoneDrawable() ?: return
-        val old = view.drawable
-        val oldW = old?.intrinsicWidth ?: 0
-        val oldH = old?.intrinsicHeight ?: 0
-        val k = readGlobal("magicxm4_icon_scale")?.toFloatOrNull() ?: scale
-        val w = if (oldW > 0) (oldW * k).toInt() else view.width
-        val h = if (oldH > 0) (oldH * k).toInt() else view.height
-        view.setImageDrawable(d)
-        if (w > 0 && h > 0) d.setBounds(0, 0, w, h)
     }
 
     private fun cleanupCard(root: android.view.View?) {
