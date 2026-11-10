@@ -91,6 +91,16 @@ jobs:
               落空都按签名去重落 magicxm4_diag_capsuleprobe 并打
               模块日志（含祖先链），下一轮可按实况归因。
 
+            - 同批修通知栏音频通知的电量行（同属连接态套 TWS 模板）：
+              原拼法是「左耳 90% 右耳 --%」。定位：sws 进程的
+              MediaSwsBatteryHook 是占位空转，可见文本由 SystemUI
+              渲染层 readBatteryLine 拼装（数据源 Settings.Global
+              magicxm4_battery 为 L,R,C 三段、旧解析第二段必失败，
+              右耳恒 --%）。XM4 真数据是单电量（RfcommController
+              另写 magicxm4_battery_single），本版电量行改单值
+              「电量 90%」（优先 single、兜底取 L 段），不再左右耳
+              模板化。Free4 的同款通知在 MagicPods 模块内，不动。
+
             其余全部不动：球图门、离线段否决、响铃摘除、入口跳板、
             文案门控保持原样；全局 getDrawable hook 不复活。
 

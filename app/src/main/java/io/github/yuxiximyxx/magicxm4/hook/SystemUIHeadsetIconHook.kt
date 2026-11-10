@@ -31,20 +31,31 @@ import kotlin.concurrent.thread
 object SystemUIHeadsetIconHook : HookContext() {
     private const val TAG = "MagicXM4-SystemUI"
 
-    /** 读跨进程电量（"L90,R85"）→ "左耳 90% 右耳 85%"；无数据返回原文占位 */
+    /**
+     * 读跨进程单电量 → "电量 90%"。
+     * ★ 3.0.16：XM4 是头戴、只有一颗总电量，原 TWS 双耳拼法
+     * （"左耳 x% 右耳 y%"）在通知行渲染成「左耳 90% 右耳 --%」：
+     * 写入端 magicxm4_battery 是 "L,R,C" 三段，旧解析对第二段拼着
+     * ",C.." 必然解析失败，右耳恒 --%。XM4 的真数据模型是单值：
+     * RfcommController.onSonyBattery 另写 magicxm4_battery_single，
+     * 优先读它；兜底取 magicxm4_battery 的 L 段（喂入时 L==总电量，
+     * L/R 同值只是借道双耳结构）。文案跟本模块单值惯例：详情页单环
+     * 标签「电量」、胶囊环纯百分比 —— 通知行作「电量 90%」，不再
+     * 出现左右耳模板。本 hook 只服务 XM4 本人（改写另有连接门控），
+     * Free4 的三段电量通知在 MagicPods 自己的模块里，不受影响。
+     */
     private fun readBatteryLine(): String = runCatching {
         val app = Class.forName("android.app.ActivityThread")
             .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
-            ?: return "左耳 --% 右耳 --%"
+            ?: return "电量 --%"
+        val single = android.provider.Settings.Global
+            .getString(app.contentResolver, "magicxm4_battery_single")?.toIntOrNull()
+        if (single != null && single in 0..100) return "电量 $single%"
         val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicxm4_battery")
-            ?: return "左耳 --% 右耳 --%"
-        if (!raw.contains(",")) return "左耳 --% 右耳 --%"
+            ?: return "电量 --%"
         val l = raw.substringBefore(',').removePrefix("L").toIntOrNull()
-        val r = raw.substringAfter(',').removePrefix("R").toIntOrNull()
-        val ls = if (l != null && l >= 0) "左耳 $l%" else "左耳 --%"
-        val rs = if (r != null && r >= 0) "右耳 $r%" else "右耳 --%"
-        "$ls $rs"
-    }.getOrDefault("左耳 --% 右耳 --%")
+        if (l != null && l in 0..100) "电量 $l%" else "电量 --%"
+    }.getOrDefault("电量 --%")
 
     /**
      * ★ 3.0.8 连接门控：文案改写只在 XM4 本人是当前已连接的 A2DP 设备时才许动。
