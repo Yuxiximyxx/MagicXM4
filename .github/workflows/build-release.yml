@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.14-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.15-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.14-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.15-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,37 +64,38 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.14
-          name: MagicXM4 v3.0.14 — 全屏球阵页球图定位探针（只观察不改图）
+          tag_name: v3.0.15
+          name: MagicXM4 v3.0.15 — 球阵页按探针实况装门（球根 DeviceBallView + 名牌主判据）
           body: |
-            ## MagicXM4 3.0.14（叠在 3.0.13 之上）
+            ## MagicXM4 3.0.15（叠在 3.0.14 之上）
 
-            本版不改任何图标行为，只装定位探针：3.0.13 已确认下拉
-            面板的球正常（FreeBuds / Enco 恢复耳塞图、XM4 是头戴图），
-            但全屏球阵页里 XM4 的球变回了耳塞图——那一页里耳塞图递进
-            图标位的调用没被 3.0.13 的门逮住，球根的确切类名/层级在
-            静态材料里定不了。
+            3.0.14 探针已把全屏球阵页的实况钉死，本版按实况装门：
 
-            ### 本版做了什么
-
-            - 在既有的 ImageView.setImageResource / setImageDrawable
-              两入口旁挂只观察的记录：耳塞图递进图标位时，把图标位
-              的祖先链类名序列、球根命中形态、球名牌文案打进模块
-              日志与 Settings.Global（magicxm4_diag_gridprobe）；
-            - 另挂 TextView.setText 名牌锚点：设备名出现时记录名牌
-              的祖先链（名牌必然长在球身上，是球根形状的硬证据）；
-            - 探针只记不改：不换任何图、不动任何返回值，控制面与
-              3.0.13 逐行一致；3.0.13 撤掉的全局 getDrawable hook
-              不复活。
+            - 球根类实测是 `DeviceBallView`，不是 3.0.13 findBallOf
+              硬编码的 `BasicDeviceBallView` 全名——旧门在任何界面都
+              找不到球根，这是 3.0.13 在球阵页漏换 XM4 的根因。
+              本版放宽类名匹配（simpleName == DeviceBallView、类名以
+              ".DeviceBallView" 结尾、或原 BasicDeviceBallView 全名，
+              任一命中即认），深度上限 16（图标位到球根实测 5 层）。
+            - 换图判据改以球根子树内的名牌 `device_ball_name` 文案
+              == WH-1000XM4 为主判据（探针实测在 setImageDrawable
+              时机可回读、能干净区分 XM4 与别家球），原 DeviceInfo
+              判据为备；任一正向命中才在同一次设图调用内换成头戴图
+              device_icon_default_earphone。名牌读不到/为空/别家名
+              且 DeviceInfo 也不命中 → 原样放行；没有祖先的独立
+              图标位（探针 root=none）同样放行。
+            - 每次换图命中额外打一行归因日志（球名牌 + 来源入口），
+              供下轮核对与 MagicPods 的交叉影响；3.0.14 探针保留、
+              行为不变。
 
             其余全部不动：3.0.11 离线段否决、3.0.12 响铃摘除与入口
-            跳板、文案门控、面板侧球图门保持原样。
+            跳板、文案门控保持原样；3.0.13 撤掉的全局 getDrawable
+            hook 不复活。
 
-            签名与 3.0.13 同证书（SHA-256: 62F45C54…8C55），可直接
+            签名与 3.0.14 同证书（SHA-256: 62F45C54…8C55），可直接
             覆盖装。
 
-            待真机取证：装后打开全屏球阵页一次即可（探针自动记录），
-            随后导出 LSPosed 日志或读 magicxm4_diag_gridprobe /
-            magicxm4_diag_gridprobe_name 两个值，下一版按实况装门。
+            待真机验证：球阵页与下拉面板里 XM4 的球是头戴图、
+            FreeBuds / Enco 的球保持耳塞图，两边都不再翻转。
 
           files: dist/*.apk

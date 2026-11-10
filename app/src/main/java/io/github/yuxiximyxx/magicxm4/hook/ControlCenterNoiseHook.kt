@@ -727,6 +727,11 @@ object ControlCenterNoiseHook : HookContext() {
             //   setImageResource / setImageDrawable 两入口，沿父链找到
             //   球根、读 DeviceInfo 正向验明是 XM4 的球才换（详见
             //   installBallIconHook 函数头注）。
+            //   【3.0.15 追记】3.0.14 探针钉死：球根类实测是
+            //   DeviceBallView、findBallOf 旧硬编码全名恒落空；本版
+            //   放宽类名匹配，判据改以球根子树名牌 device_ball_name
+            //   == WH-1000XM4 为主、DeviceInfo 为备；换图命中额外打
+            //   归因日志（名牌 + 入口），供与 MagicPods 交叉变化归因。
             runCatching {
                 installBallIconHook()
                 Log.i(TAG, "installed: 球图标选图同步改结果 [3.0.10/3.0.13 验球正身]")
@@ -1902,21 +1907,56 @@ object ControlCenterNoiseHook : HookContext() {
     }
 
     /**
-     * 沿 ImageView 的父链向上找它所属的 BasicDeviceBallView（球根视图）
-     * —— ★ 3.0.13 换图的唯一作用域判据：只认「这张图正被设进哪颗球」
-     *   本身。找不到（不在任何球里）返回 null，调用方一律原样放行。
+     * 沿 ImageView 的父链向上找它所属的球根视图 —— 换图/探针的作用域
+     * 判据：只认「这张图正被设进哪颗球」本身。找不到（不在任何球里，
+     * 如卡片内独立图标位）返回 null，调用方一律原样放行。
+     *
+     * ★ 3.0.15：球根类名按 3.0.14 探针真机实况改判 —— 全屏球阵页与
+     *   下拉面板的球根实测都是 `DeviceBallView`（祖先链末端类名），
+     *   不是本函数此前硬编码的 `...widget.BasicDeviceBallView` 全名，
+     *   3.0.13 的门因此在任何界面都找不到球根（探针 inBall 恒
+     *   false）。本版放宽为：类 simpleName == "DeviceBallView"、或
+     *   类名以 ".DeviceBallView" 结尾、或原 BasicDeviceBallView 全名，
+     *   任一命中即认。图标位到球根实测 5 层，深度上限放宽到 16。
      */
     private fun findBallOf(view: android.view.View): android.view.View? {
         var node: android.view.View? = view
         var depth = 0
-        while (node != null && depth < 12) {
-            if (node.javaClass.name ==
-                "com.hihonor.controlviewnew.widget.BasicDeviceBallView"
+        while (node != null && depth < 16) {
+            val clsName = node.javaClass.name
+            if (clsName == "com.hihonor.controlviewnew.widget.BasicDeviceBallView" ||
+                clsName.endsWith(".DeviceBallView") ||
+                node.javaClass.simpleName == "DeviceBallView"
             ) return node
             node = node.parent as? android.view.View
             depth++
         }
         return null
+    }
+
+    /**
+     * ★ 3.0.15：读球根子树内 device_ball_name 名牌的文案（trim 后）。
+     * 3.0.14 探针实况：名牌就长在球根子树里，setImageDrawable 时机
+     * 回读能干净区分 XM4（WH-1000XM4）与别家（OPPO Enco Free4）；
+     * 个别球回读为空（绑名时序未到）—— 返回 null，调用方按「认不出
+     * → 放行」处理，绝不当作命中。
+     */
+    private fun ballNameOf(ball: android.view.View): String? {
+        val tv = findByIdName(ball, "device_ball_name") as? android.widget.TextView
+        return tv?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * ★ 3.0.15：换图正身总判据 —— 名牌主判 + DeviceInfo 备判，任一
+     * 正向命中才认（见 installBallIconHook 头注）。名牌判据来自探针
+     * 实况（见 ballNameOf）；DeviceInfo 判据沿用 3.0.13 的
+     * isOurBallView（其内部末尾的名牌兜底与主判同源、重复读无害）。
+     * 两判据都不命中 —— 包括名牌读不到/为空/别家名、DeviceInfo
+     * 读不到 —— 一律不是我们的球，绝不换。
+     */
+    private fun isOurBall(ball: android.view.View): Boolean {
+        if (ballNameOf(ball) == OUR_NAME) return true
+        return isOurBallView(ball)
     }
 
     // 耳塞两图的 ConstantState 缓存（setImageDrawable 入口认图用）。
@@ -1956,11 +1996,23 @@ object ControlCenterNoiseHook : HookContext() {
         return -1
     }
 
-    private fun logBallIconHit(where: String, fromName: String) {
-        val sig = "$where|$fromName"
+    private fun logBallIconHit(where: String, fromName: String, ballName: String?) {
+        val sig = "$where|$fromName|${ballName ?: "-"}"
         if (BALL_ICON_SEEN.add(sig) && BALL_ICON_TOTAL.incrementAndGet() <= 20) {
-            Log.w(TAG, "★ 球图标选图同步改: $where $fromName → device_icon_default_earphone")
-            diag("icon", "$where $fromName -> default_earphone（3.0.10 同步改结果）")
+            // ★ 3.0.15 交叉变化归因：用户反馈「Free4 和 XM4 的球图好像
+            //   都在变」，怀疑 MagicPods（magicfree4，资源潜行 hook 同
+            //   在 controlcenter/systemui）与本模块交叉影响。本行在每次
+            //   换图命中时额外带上球名牌与来源入口，供下轮日志归因 ——
+            //   只加日志，不改任何行为（探针侧亦靠本行对齐时间点）。
+            Log.w(
+                TAG,
+                "★ 球图标选图同步改: $where $fromName → device_icon_default_earphone" +
+                    "（归因 ballName=${ballName ?: "-"} via=$where）"
+            )
+            diag(
+                "icon",
+                "$where $fromName -> default_earphone ballName=${ballName ?: "-"}（3.0.15）"
+            )
         }
     }
 
@@ -1971,9 +2023,16 @@ object ControlCenterNoiseHook : HookContext() {
      * postDelayed 触发已在 3.0.10 整体退役：模块从不在绘制后换球的图。
      *
      * ★ 3.0.13 收紧 —— 只留两个**带 receiver 视图**的交付入口，且
-     *   必须沿 ImageView 父链找到所属球根视图、读其 DeviceInfo 正向
-     *   命中 XM4（isOurBallView）才换；认不出、读不到、非本人，一律
-     *   原样放行：
+     *   必须沿 ImageView 父链找到所属球根视图、正向验明是 XM4 的球
+     *   才换；认不出、读不到、非本人，一律原样放行：
+     * ★ 3.0.15 判据改版（3.0.14 探针真机实况）—— 球根类实测是
+     *   DeviceBallView 而非 BasicDeviceBallView，3.0.13 的 findBallOf
+     *   硬编码全名在任何界面都找不到球根；且球根上未必读得到
+     *   DeviceInfo。本版：findBallOf 放宽类名匹配（见其头注），正身
+     *   判据以球根子树内 device_ball_name 名牌 == WH-1000XM4 为主、
+     *   原 DeviceInfo 判据（isOurBallView）为备（总判据 isOurBall），
+     *   任一正向命中才换；名牌读不到/为空/别家名且 DeviceInfo 也不
+     *   命中 → 放行。无祖先的独立图标位（探针 root=none）同样放行：
      *   a) ImageView.setImageResource(int)：入参是 in_ear / semi_in_ear
      *      两张耳塞图之一、且所属球验明正身，才把入参换成头戴图 id
      *      再 proceed —— 主路径；
@@ -1993,12 +2052,21 @@ object ControlCenterNoiseHook : HookContext() {
      * 单点失败各自记日志，不拖垮其他 hook。
      */
     private fun installBallIconHook() {
-        val ballCls = findClass("com.hihonor.controlviewnew.widget.BasicDeviceBallView")
+        // ★ 3.0.15：探针实况球根类是 DeviceBallView（见 findBallOf
+        //   头注）；旧的 BasicDeviceBallView 全名在本进程未必存在，
+        //   findClass 抛 CNFE 会把整个装载函数带崩、两入口都装不上。
+        //   改为候选类逐个 runCatching 取第一个能加载的，只供下方
+        //   方法面备查 diag 用，取不到不影响两入口装载。
+        val ballCls = listOf(
+            "com.hihonor.controlviewnew.widget.DeviceBallView",
+            "com.hihonor.controlviewnew.widget.BasicDeviceBallView"
+        ).firstNotNullOfOrNull { runCatching { findClass(it) }.getOrNull() }
 
         // 备查：球的图标相关方法面（initIcon 的确切签名以真机此行为准）。
         runCatching {
+            val cls = ballCls ?: return@runCatching
             val sb = StringBuilder()
-            for (m in ballCls.declaredMethods.sortedBy { it.name }) {
+            for (m in cls.declaredMethods.sortedBy { it.name }) {
                 val n = m.name.lowercase()
                 if (n.contains("icon") || n.contains("image") || n.contains("init")) {
                     sb.append(m.name).append('(')
@@ -2024,13 +2092,15 @@ object ControlCenterNoiseHook : HookContext() {
                         (resIdArg == ids[1] || resIdArg == ids[2])
                     ) {
                         val ball = findBallOf(view)
-                        if (ball != null && isOurBallView(ball)) {
+                        if (ball != null && isOurBall(ball)) {
                             BALL_ICON_GUARD.set(true)
                             try {
                                 val fromName = runCatching {
                                     view.resources.getResourceEntryName(resIdArg)
                                 }.getOrDefault("id$resIdArg")
-                                logBallIconHit("setImageResource", fromName)
+                                logBallIconHit(
+                                    "setImageResource", fromName, ballNameOf(ball)
+                                )
                                 val newArgs = chain.args.toTypedArray()
                                 newArgs[0] = ids[0]
                                 return@intercept chain.proceed(newArgs)
@@ -2073,7 +2143,7 @@ object ControlCenterNoiseHook : HookContext() {
                     }
                     if (ids != null && earIdx > 0) {
                         val ball = findBallOf(view)
-                        if (ball != null && isOurBallView(ball)) {
+                        if (ball != null && isOurBall(ball)) {
                             val head = runCatching {
                                 view.resources.getDrawable(ids[0], view.context?.theme)
                             }.getOrNull()
@@ -2083,7 +2153,9 @@ object ControlCenterNoiseHook : HookContext() {
                                     val fromName = runCatching {
                                         view.resources.getResourceEntryName(ids[earIdx])
                                     }.getOrDefault("id${ids[earIdx]}")
-                                    logBallIconHit("setImageDrawable", fromName)
+                                    logBallIconHit(
+                                        "setImageDrawable", fromName, ballNameOf(ball)
+                                    )
                                     val newArgs = chain.args.toTypedArray()
                                     newArgs[0] = head
                                     return@intercept chain.proceed(newArgs)
@@ -2100,7 +2172,7 @@ object ControlCenterNoiseHook : HookContext() {
         }.onFailure {
             Log.w(TAG, "球图标选图: setImageDrawable 装载失败: ${it.javaClass.simpleName}: ${it.message}")
         }
-        diag("hook_ballicon", "installed（3.0.13 仅 ImageView 两入口、验球正身）")
+        diag("hook_ballicon", "installed（3.0.15 仅 ImageView 两入口、球根 DeviceBallView、名牌主判据）")
     }
 
     /**
