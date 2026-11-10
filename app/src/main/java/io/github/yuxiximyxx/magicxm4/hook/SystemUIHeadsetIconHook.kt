@@ -392,6 +392,11 @@ object SystemUIHeadsetIconHook : HookContext() {
     // ★ 3.0.18：胶囊树扫描换图（capsuleTreeSwap*）—— 探针钉死图标位
     //   是位图交付，改在文本绑齐后对 HnCardLayout 子树内的位图位
     //   直接换图；探针与名牌门保留不动。
+    // ★ 3.0.19：二选一判完 —— 3.0.18 换掉的 140x140 位图位不是
+    //   肉眼可见的左图（真机证伪，它是环内小图/底图，撤换）；可见
+    //   左图是 HnCardIconLayout 内的 RemotableAnimationImageView
+    //   （AnimatedImageDrawable 200x200），换图目标改到它，并补
+    //   延迟帧防宿主重设动画图覆盖（animRebound）。
     private val CAPSULE_ICON_GUARD = object : ThreadLocal<Boolean>() {
         override fun initialValue(): Boolean = false
     }
@@ -656,7 +661,7 @@ object SystemUIHeadsetIconHook : HookContext() {
         }.onFailure {
             Log.w(TAG, "胶囊树探针 setText 装载失败: ${it.javaClass.simpleName}")
         }
-        capsuleDiag("installed=$installed/3 (3.0.18 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针 + 树扫描换位图位)")
+        capsuleDiag("installed=$installed/3 (3.0.19 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针 + 树扫描换动效层)")
         Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/3)")
     }
 
@@ -764,23 +769,25 @@ object SystemUIHeadsetIconHook : HookContext() {
     }
 
     /**
-     * ★ 3.0.18 胶囊树扫描换图的调度：与整树探针同一锚点、同一节奏
-     * （当前帧 + 150ms + 500ms）。探针（LSPosed_20261110_162108，
-     * 16:20）已钉死：命中树 root=HnDynamicCardSetView，设备图位是
-     * HnCardLayout 子树内一颗 BitmapDrawable 140x140 的 ImageView
-     * —— 位图交付，entry 名 / ConstantState 认图全落空、setImage*
-     * 拦截也逮不到交付时机。故改在文本绑齐后直接对该位换图。
-     * 同一锚点只挂一轮（弱引用集合防重复挂）。
+     * ★ 胶囊树扫描换图的调度：与整树探针同一锚点、同一节奏
+     * （当前帧 + 150ms + 500ms）。3.0.18 在文本绑齐后对位图位
+     * 直接换图；3.0.19 换图目标改到动效层（见 capsuleTreeSwapScan
+     * 注释），三帧兼作防覆盖复核。同一锚点只挂一轮（弱引用集合
+     * 防重复挂）。swapped 记录本轮是否已换过一次，供复核帧区分
+     * 首次换图与宿主重设动画图后的回弹再换。
      */
     private fun capsuleTreeSwapSchedule(anchor: android.widget.TextView, via: String) {
         if (!CAPSULE_SWAP_PENDING.add(anchor)) return
         val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val swapped = java.util.concurrent.atomic.AtomicBoolean(false)
+        val slotRef =
+            java.util.concurrent.atomic.AtomicReference<android.widget.ImageView?>(null)
         val delays = longArrayOf(0L, 150L, 500L)
         var postedAny = false
         for (i in delays.indices) {
             val last = i == delays.lastIndex
             val r = Runnable {
-                capsuleTreeSwapScan(anchor, via, i, done)
+                capsuleTreeSwapScan(anchor, via, i, done, swapped, slotRef)
                 if (last) CAPSULE_SWAP_PENDING.remove(anchor)
             }
             val ok = runCatching {
@@ -792,19 +799,24 @@ object SystemUIHeadsetIconHook : HookContext() {
     }
 
     /**
-     * 树扫描换图（3.0.18）：锚点所在窗口整棵树同时含「已连接」与
+     * 树扫描换图（3.0.19）：锚点所在窗口整棵树同时含「已连接」与
      * 我方名牌才动手 —— Free4 的胶囊树名牌是 OPPO Enco Free4，
-     * 天然不命中；其余通知树不碰。在 HnCardLayout 子树内找设备
-     * 图位：drawable 为 BitmapDrawable 且 intrinsic 约 140x140 的
-     * ImageView（探针实测的那颗静态设备图位）。只换这一颗；
-     * 同树的 RemotableAnimationImageView（200x200，疑似动效层）
-     * 只记进换图日志对照、本版不动 —— 若真机换完仍是耳塞图，
-     * 下一轮按日志翻它。命中后打一行 treeSwap（含图位祖先链与
-     * 换前尺寸），仍落 magicxm4_diag_capsuleprobe。
+     * 天然不命中；其余通知树不碰。换图目标是 HnCardIconLayout
+     * 子树内的 RemotableAnimationImageView（drawable 为
+     * AnimatedImageDrawable，探针实测 200x200）：3.0.18 真机实证
+     * 它换掉的 140x140 BitmapDrawable 位不是肉眼可见的左图（那颗
+     * 是 90% 电量环内小图/底图，本版撤换、不再碰），胶囊左图就是
+     * 这颗动效层 —— 连接动画播完停在耳塞图那一帧。换成静态头戴
+     * 图后，宿主可能再对该 View 重设动画图覆盖，故三帧扫描兼作
+     * 复核：slotRef 记住图位，后续帧发现它又变回动画图就再换一次
+     * 并记 animRebound；已是头戴图则收工。首次命中记 animSwap
+     * （含图位祖先链与换前尺寸），仍落 magicxm4_diag_capsuleprobe。
      */
     private fun capsuleTreeSwapScan(
         anchor: android.view.View, via: String, frame: Int,
-        done: java.util.concurrent.atomic.AtomicBoolean
+        done: java.util.concurrent.atomic.AtomicBoolean,
+        swapped: java.util.concurrent.atomic.AtomicBoolean,
+        slotRef: java.util.concurrent.atomic.AtomicReference<android.widget.ImageView?>
     ) {
         runCatching {
             if (done.get()) return@runCatching
@@ -823,31 +835,34 @@ object SystemUIHeadsetIconHook : HookContext() {
                 depth++
             }
             val texts = mutableListOf<String>()
-            var slot: android.widget.ImageView? = null
-            var animSeen = false
+            var animSlot: android.widget.ImageView? = null
+            var animScore = -1
+            var bitmapSeen = false
             var count = 0
-            fun dfs(v: android.view.View, inCard: Boolean) {
+            fun dfs(v: android.view.View, inIcon: Boolean) {
                 if (++count > 240) return
-                val inside = inCard || v.javaClass.simpleName == "HnCardLayout"
+                val insideIcon = inIcon || v.javaClass.simpleName == "HnCardIconLayout"
                 if (v is android.widget.TextView) {
                     v.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
                         ?.let { texts.add(it) }
                 }
                 if (v is android.widget.ImageView) {
-                    if (v.javaClass.simpleName == "RemotableAnimationImageView") {
-                        animSeen = true
-                    }
                     val d = v.drawable
-                    if (slot == null && inside &&
-                        d is android.graphics.drawable.BitmapDrawable
-                    ) {
-                        val w = d.intrinsicWidth
-                        val h = d.intrinsicHeight
-                        if (w in 120..160 && h in 120..160) slot = v
+                    if (d is android.graphics.drawable.BitmapDrawable) bitmapSeen = true
+                    if (d is android.graphics.drawable.AnimatedImageDrawable) {
+                        // HnCardIconLayout 内优先，其次类名 Remotable*。
+                        val score = (if (insideIcon) 10 else 0) +
+                            (if (v.javaClass.simpleName ==
+                                "RemotableAnimationImageView"
+                            ) 5 else 0)
+                        if (score > animScore) {
+                            animScore = score
+                            animSlot = v
+                        }
                     }
                 }
                 if (v is android.view.ViewGroup) {
-                    for (i in 0 until v.childCount) dfs(v.getChildAt(i), inside)
+                    for (i in 0 until v.childCount) dfs(v.getChildAt(i), insideIcon)
                 }
             }
             dfs(root, false)
@@ -861,45 +876,58 @@ object SystemUIHeadsetIconHook : HookContext() {
                 )
                 return@runCatching
             }
-            val target = slot
+            // 图位优先用 slotRef 里记住的那颗（换成头戴图后它不再
+            // 持有动画图、DFS 就找不到了，复核帧靠它认）；本轮首次
+            // 找到则记进 slotRef。
+            val target = slotRef.get() ?: animSlot?.also { slotRef.set(it) }
             if (target == null) {
                 capsuleLog(
                     "swapmiss|$via|noslot|${root.javaClass.simpleName}",
-                    "treeSwap miss via=$via frame=$frame reason=noBitmapSlot " +
-                        "root=${root.javaClass.simpleName} animSeen=$animSeen"
+                    "animSwap miss via=$via frame=$frame reason=noAnimSlot " +
+                        "root=${root.javaClass.simpleName} bitmapSeen=$bitmapSeen"
                 )
                 return@runCatching
             }
-            // 已是头戴图（上一轮换过）→ 收工，不重复换。
-            if (capsuleDrawableKind(target, target.drawable) == "headphone") {
+            val cur = target.drawable
+            // 已是头戴图（本轮换过且未被覆盖，或宿主本就给的头戴图）→ 收工。
+            if (capsuleDrawableKind(target, cur) == "headphone") {
                 done.set(true)
+                return@runCatching
+            }
+            // 不是动画图也不是头戴图（空图/其他图）→ 本帧不动，等下一帧。
+            if (cur !is android.graphics.drawable.AnimatedImageDrawable) {
                 return@runCatching
             }
             val head = loadCapsuleHeadphone(target)
             if (head == null) {
                 capsuleLog(
                     "swapmiss|$via|nohead",
-                    "treeSwap miss via=$via frame=$frame reason=headphoneLoadFail"
+                    "animSwap miss via=$via frame=$frame reason=headphoneLoadFail"
                 )
                 return@runCatching
             }
-            val pre = target.drawable
-            val preSize = if (pre != null) {
-                "${pre.intrinsicWidth}x${pre.intrinsicHeight}"
-            } else {
-                "-"
-            }
+            val preSize = "${cur.intrinsicWidth}x${cur.intrinsicHeight}"
             CAPSULE_ICON_GUARD.set(true)
             try { target.setImageDrawable(head) } finally {
                 CAPSULE_ICON_GUARD.set(false)
             }
-            done.set(true)
-            capsuleLog(
-                "treeswap|$via",
-                "treeSwap via=$via frame=$frame slot=BitmapDrawable size=$preSize " +
-                    "swapped=headphone animSeen=$animSeen " +
-                    "chain=${capsuleAncestorChain(target)}"
-            )
+            if (swapped.getAndSet(true)) {
+                // 本轮已换过一次、又变回动画图 = 宿主重设覆盖 → 回弹再换。
+                capsuleLog(
+                    "animrebound|$via",
+                    "animRebound via=$via frame=$frame slot=AnimatedImageDrawable " +
+                        "size=$preSize swapped=headphone " +
+                        "chain=${capsuleAncestorChain(target)}"
+                )
+            } else {
+                capsuleLog(
+                    "animswap|$via",
+                    "animSwap via=$via frame=$frame slot=AnimatedImageDrawable " +
+                        "size=$preSize swapped=headphone " +
+                        "chain=${capsuleAncestorChain(target)}"
+                )
+            }
+            // 不 set done：后续帧继续复核，防宿主重设动画图覆盖。
         }
     }
 
