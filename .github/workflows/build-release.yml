@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.12-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.13-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.12-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.13-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,55 +64,49 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.12
-          name: MagicXM4 v3.0.12 — 删卡片响铃查找（连接/离线）+ 模块入口直达详情页
+          tag_name: v3.0.13
+          name: MagicXM4 v3.0.13 — 修球阵图标误伤：换图只认 XM4 本人的球
           body: |
-            ## MagicXM4 3.0.12（叠在 3.0.11 之上）
+            ## MagicXM4 3.0.13（叠在 3.0.12 之上）
 
-            本版两项：
+            只修一个回归：设备中心球阵里所有耳机的球都被换成了
+            头戴式图标（FreeBuds、Enco 的球也变头戴图，XM4 本人
+            是对的）。
 
-            ### ① 展开卡删掉「响铃查找」（连接和未连接的卡都删）
+            ### 根因
 
-            WH-1000XM4 没有响铃查找功能，展开卡顶部那一行是荣耀按
-            模板装配的。查清它在数据层的结构：它不是独立 section
-            （createSections 只经 create*Section 生成电量/噪声两段，
-            无生成方法可否决），而是混在某段 sectionDataList 里的
-            一个 ServiceCardInfo 数据项（bsId 含 Find，即历史上
-            FIX-006 把它置 NORMAL 放行可点的那一项）。
+            3.0.10 的换图挂了三个入口，其中 Resources.getDrawable
+            与 Context.getDrawable 两层没有视图上下文，当年的作用域
+            限定是「调用栈里有 BasicDeviceBallView + 在场登记表里
+            有 XM4 的球」：球阵里 XM4 的球常驻在场，别家耳机的球
+            取自己的耳塞图时栈上同样有 BasicDeviceBallView，两条
+            限定全过 —— 三家耳机共用同一批耳塞图资源 id，于是
+            谁取图都把结果换成头戴图。
 
-            改法：postFixSections 在 gen 返回后、卡片视图创建前，
-            按 bsId 把该数据项整项摘除（不带连接态条件，连接/离线
-            都摘；落地三档：数据列表原地改 → 段 setter → 段被摘空
-            时整段移除，摘完回读计数打 diag 可查）。历史上「置
-            NORMAL」的分支删除；视图层 cleanupCard 里按文案藏
-            响铃行的整套逻辑（上两层定位 + diag 视图树 dump）一并
-            清除，只保留「自适应」一颗按钮的隐藏。
+            ### 修法
 
-            装配数据里从一开始就没有这一项，在线卡展开高度不会
-            出现新的先大后小。
+            - 撤掉 Resources.getDrawable（两个重载）与
+              Context.getDrawable（ContextImpl / ContextWrapper）
+              两层 hook，及其唯一用途的球构造登记表；
+            - 换图只剩带 receiver 视图的两个入口：
+              ImageView.setImageResource（主路径，原有）与
+              ImageView.setImageDrawable（本版新增，兜住宿主先取图
+              再 setDrawable 的路径；递进来的 Drawable 先按
+              ConstantState 身份认出是耳塞两图之一）；
+            - 两个入口都必须沿 ImageView 父链找到所属球根视图、
+              读其所持 DeviceInfo，id 命中 XM4 的 MAC 或名字为
+              WH-1000XM4 正向命中才换；认不出、读不到、非本人，
+              一律原样放行 —— 宁可漏换，绝不再误伤。
 
-            ### ② 模块入口照 MagicPods 改成直达详情页
+            其余全部不动：3.0.11 的离线电量/噪声段否决、3.0.12 的
+            响铃查找摘除与模块入口直达详情页、文案连接门控保持
+            原样。
 
-            - MainActivity 改为无界面跳板：onCreate 立即转发
-              EarphoneDetailActivity 并 finish，不再渲染
-              MagicXM4AppCompose 首页；
-            - manifest 本就与 MagicPods 同构（LauncherActivity
-              alias 已指向详情页、MODULE_SETTINGS 挂在
-              MainActivity），未改动，两条入口现在都直达详情页；
-            - 详情页「关于耳机」里的「模块设置」NavRow 一并去掉
-              （跳板会把人绕回详情页本身，同 MagicPods 的处理）；
-            - PopupActivity 保留不动：它仍在渲染首页 Compose，
-              是全仓仅剩的一处引用，首页 Compose 不成死代码。
-
-            其余全部不动：3.0.11 的离线电量/噪声否决、文案门控、
-            球图标同步换图保持原样。
-
-            签名与 3.0.11 同证书（SHA-256: 62F45C54…8C55），可直接
+            签名与 3.0.12 同证书（SHA-256: 62F45C54…8C55），可直接
             覆盖装。
 
-            待真机验证：连接与未连接两种展开卡上都没有「响铃
-            查找」一行，其余行（电量/噪声/去连接·断开连接/更多
-            设置）如常；点桌面图标或从 LSPosed 进模块设置都直达
-            耳机详情页，不闪首页。
+            待真机验证：球阵里 FreeBuds、Enco 的球恢复各自的耳塞
+            图标，XM4 的球仍是头戴图；展开 XM4 卡片动画与离线
+            高度如 3.0.11/3.0.12 不变。
 
           files: dist/*.apk
