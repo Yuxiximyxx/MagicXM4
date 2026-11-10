@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.16-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.17-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.16-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.17-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,55 +64,47 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.16
-          name: MagicXM4 v3.0.16 — 灵动岛胶囊图标换头戴（SystemUI 名牌门）
+          tag_name: v3.0.17
+          name: MagicXM4 v3.0.17 — 胶囊图标探针补灵敏度（只观察，不动文案）
           body: |
-            ## MagicXM4 3.0.16（叠在 3.0.15 之上）
+            ## MagicXM4 3.0.17（叠在 3.0.16 之上）
 
-            只修一个新面：XM4 已连接时，顶部灵动岛胶囊（「已连接 /
-            WH-1000XM4」+ 电量环）左侧图标是入耳式耳塞图，应为头戴式。
-            胶囊在 SystemUI 进程渲染、不走 DeviceBallView，球图门管不到；
-            且 XM4 注入的 DeviceInfo 与 Free4 同为 00VVD9 / Third，
-            胶囊按资源键取图区分不了两者，必须按设备身份介入。
+            本版只补胶囊图标探针的灵敏度，通知文案侧代码一个字未动。
 
-            - 在 SystemUI 的 ImageView.setImageResource /
-              setImageDrawable 两入口加名牌门：入参是耳塞家族图
-              （device_icon_in_ear / semi_in_ear_earphone_shadow，
-              资源 id 走 entry 名、Drawable 走 ConstantState 身份）
-              且图标位所属视图树内有设备名 TextView == WH-1000XM4
-              时，同一次调用内换成头戴图 device_icon_default_earphone
-              （优先图标位自己资源包的同名资源，没有再从
-              com.hihonor.controlcenter 包资源加载）。
-            - 名牌在设图之后才绑定的时序，补一次 post 单帧复核：
-              树内同时有「WH-1000XM4」与「已连接」、且当前图仍是
-              耳塞图才换。XM4 未连接时拦截零动作；Free4 的胶囊树里
-              是别的名字，天然不命中，别家胶囊一律不碰。
-            - 胶囊图标的静态来源定不死，本版同时留最小探针：命中与
-              落空都按签名去重落 magicxm4_diag_capsuleprobe 并打
-              模块日志（含祖先链），下一轮可按实况归因。
+            背景（16:05 真机 LSPosed 日志已钉死）：3.0.16 的通知修复
+            其实已经生效——截图里那次「左耳 90% 右耳 --%」是 SystemUI
+            旧进程里 3.0.15 时代旧代码的最后一次发作（16:04:42），
+            3.0.16 新代码 16:04:45 已在新 SystemUI 进程装载完毕，
+            只改占位标题 → 名字、绝不产生电量行。真正没解决的是
+            胶囊图标：新进程里两个 ImageView 设图拦截全程零触发，
+            说明胶囊图标位不是经 setImageResource / setImageDrawable
+            设图的。
 
-            - 同批修通知栏音频通知（同属连接态套 TWS 模板）：它原
-              显示「WH-1000XM4 / 左耳 90% 右耳 --%」。定位：可见
-              文本由 SystemUI 渲染层拼装 —— 本模块的改写把通知里的
-              设备名行顶成了电量行（数据源是蓝牙进程写入的
-              L,R,C 三段电量，旧解析第二段必失败、右耳恒 --%）；
-              sws 进程的 MediaSwsBatteryHook 是占位空转、与此无关。
-              用户点名的目标形态是这条通知只显示设备名、不带任何
-              电量信息，故本版直接停掉「名字行 → 电量行」改写
-              （RemoteViews.apply 遍历与 TextView.setText 终防线
-              两处），只保留占位标题 → 设备名：结果标题 = 内容 =
-              WH-1000XM4，恢复宿主对普通蓝牙耳机这条通知的原生
-              形态。跨进程电量键保留（设备卡/详情页仍在用）。
-              Free4 的同款通知在 MagicPods 模块内，不动。
+            - 新增整树探针（只观察、绝不换图）：胶囊的名牌与
+              「已连接」文本必经 TextView.setText（旧改写实证命中
+              过这一路），在此触发对锚点所在窗口整棵树的扫描
+              （当前帧 + 150ms + 500ms 三帧）：树内同时有
+              「已连接」与「WH-1000XM4」时，记录全部 ImageView
+              的类名、图种类（耳塞 / 头戴 / 类名）、尺寸与祖先
+              链；不齐时记录 nameFound / connectedFound 落空
+              原因。结果仍落 magicxm4_diag_capsuleprobe 并打模块
+              日志，签名去重、上限由 24 放宽到 40。目标：钉死
+              胶囊图标位到底是什么 View、图是怎么交付的，下一版
+              按实况装门。
+            - 名牌后绑的延迟复核由单帧改多帧（当前帧 + 150ms +
+              500ms），每帧落空都记一行原因（nameFound /
+              connectedFound / 当前图类名）；换图判据与动作不变。
 
-            其余全部不动：球图门、离线段否决、响铃摘除、入口跳板、
-            文案门控保持原样；全局 getDrawable hook 不复活。
+            其余全部不动：球图门、离线段否决、响铃摘除、入口
+            跳板、通知文案（含 3.0.16 的名字行处理）保持原样；
+            全局 getDrawable hook 不复活。
 
-            签名与 3.0.15 同证书（SHA-256: 62F45C54…8C55），可直接
-            覆盖装。装后须强停 SystemUI 宿主进程（或等其重启）才
-            加载新代码。
+            签名与 3.0.16 同证书（SHA-256: 62F45C54…8C55），可
+            直接覆盖装。装后须强停 SystemUI 宿主进程（或等其
+            重启）才加载新代码。
 
-            待真机验证：XM4 连接时顶部胶囊左侧是头戴图；Free4 连接
-            时胶囊仍是耳塞图、不受影响。
+            取证：装后连接 XM4 让胶囊出现一次即可，探针自动
+            记录；之后导一份 LSPosed 日志（看「胶囊图标
+            treeprobe」行）即可定位图标位。
 
           files: dist/*.apk

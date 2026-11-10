@@ -384,7 +384,10 @@ object SystemUIHeadsetIconHook : HookContext() {
     // ── ★ 3.0.16 胶囊图标换图的状态 ─────────────────────────────
     // CAPSULE_ICON_GUARD：换图时自己调 setImageDrawable 会再进拦截，靠它防递归。
     // CAPSULE_SEEN / CAPSULE_TOTAL：日志按签名去重封顶（沿用球阵探针纪律）。
-    // CAPSULE_PENDING：已挂单帧复核的图标位（弱引用集合，防重复挂）。
+    // CAPSULE_PENDING：已挂多帧复核的图标位（弱引用集合，防重复挂）。
+    // CAPSULE_PROBE_PENDING：已挂整树探针扫描的锚点 TextView（同上）。
+    // ★ 3.0.17：胶囊探针补灵敏度 —— 新增 setText 触发的整树扫描
+    //   （capsuleTreeProbe*）与多帧复核的落空原因记录；换图判据不变。
     private val CAPSULE_ICON_GUARD = object : ThreadLocal<Boolean>() {
         override fun initialValue(): Boolean = false
     }
@@ -392,6 +395,8 @@ object SystemUIHeadsetIconHook : HookContext() {
         java.util.Collections.synchronizedSet(mutableSetOf())
     private val CAPSULE_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
     private val CAPSULE_PENDING: MutableSet<android.view.View> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+    private val CAPSULE_PROBE_PENDING: MutableSet<android.view.View> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap())
     @Volatile private var capsuleCcResources: android.content.res.Resources? = null
 
@@ -414,7 +419,7 @@ object SystemUIHeadsetIconHook : HookContext() {
     }
 
     private fun capsuleLog(sig: String, msg: String) {
-        if (CAPSULE_SEEN.add(sig) && CAPSULE_TOTAL.incrementAndGet() <= 24) {
+        if (CAPSULE_SEEN.add(sig) && CAPSULE_TOTAL.incrementAndGet() <= 40) {
             Log.w(TAG, "▶ 胶囊图标 $msg")
             capsuleDiag(msg)
         }
@@ -616,40 +621,205 @@ object SystemUIHeadsetIconHook : HookContext() {
         }.onFailure {
             Log.w(TAG, "胶囊图标 setImageDrawable 装载失败: ${it.javaClass.simpleName}")
         }
-        capsuleDiag("installed=$installed/2 (3.0.16 胶囊图标: 名牌门同步换 + 单帧复核 + 探针)")
-        Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/2)")
+        // c) ★ 3.0.17 兜底观察（只记不改）：16:05 真机日志实证 ——
+        //    a/b 两入口在胶囊图标位上从未被触发（全日志零条
+        //    capsuleLog），该图标位不是经 ImageView.setImageResource /
+        //    setImageDrawable 设图的。但胶囊的名牌与「已连接」文本
+        //    必经 TextView.setText（3.0.15 时代的旧改写正是靠这一路
+        //    命中胶囊的，日志实锤）。故在此按这两串文本触发整树
+        //    扫描，钉死图标位是什么 View、图怎么交付。拦截一律
+        //    原样 proceed，绝不改文本（文案侧 0/0b 的逻辑不碰）。
+        runCatching {
+            val m = Class.forName("android.widget.TextView").declaredMethods.first {
+                it.name == "setText" && it.parameterCount == 1 &&
+                        it.parameterTypes[0] == CharSequence::class.java
+            }.apply { isAccessible = true }
+            module.hook(m).intercept { chain ->
+                val ret = chain.proceed()
+                val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()?.trim()
+                val view = chain.thisObject as? android.widget.TextView
+                if (view != null && (t == CAPSULE_OUR_NAME || t == "已连接")) {
+                    capsuleTreeProbeSchedule(view, "setText")
+                }
+                ret
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "胶囊树探针 setText 装载失败: ${it.javaClass.simpleName}")
+        }
+        capsuleDiag("installed=$installed/3 (3.0.17 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针)")
+        Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/3)")
+    }
+
+    /** ImageView 当前图的种类速记：耳塞/头戴按 ConstantState 身份认，其余记类名。 */
+    private fun capsuleDrawableKind(
+        view: android.widget.ImageView, d: android.graphics.drawable.Drawable?
+    ): String {
+        if (d == null) return "null"
+        if (isCapsuleEarbudDrawable(view, d)) return "earbud"
+        val cs = runCatching { d.constantState }.getOrNull()
+        if (cs != null) {
+            val head = loadCapsuleHeadphone(view)
+            if (head != null && head.constantState === cs) return "headphone"
+        }
+        return d.javaClass.simpleName
     }
 
     /**
-     * 名牌后绑时序的单帧复核：post 到下一帧时，树内同时有我方名牌与
-     * 「已连接」、且当前图仍是耳塞图才换。胶囊不是 morph 动画主体，
-     * 单帧内换图不可见；判据不齐一律不动。
+     * ★ 3.0.17 胶囊整树探针的调度：锚点（名牌 /「已连接」的 TextView）
+     * 所在窗口整棵树，在当前帧 + 150ms + 500ms 各扫一次（图标位可能
+     * 晚于文本绑定）。同一锚点只挂一轮（弱引用集合防重复挂）。
+     */
+    private fun capsuleTreeProbeSchedule(anchor: android.widget.TextView, via: String) {
+        if (!CAPSULE_PROBE_PENDING.add(anchor)) return
+        val delays = longArrayOf(0L, 150L, 500L)
+        var postedAny = false
+        for (i in delays.indices) {
+            val last = i == delays.lastIndex
+            val r = Runnable {
+                capsuleTreeProbeScan(anchor, via, i)
+                if (last) CAPSULE_PROBE_PENDING.remove(anchor)
+            }
+            val ok = runCatching {
+                if (delays[i] <= 0L) anchor.post(r) else anchor.postDelayed(r, delays[i])
+            }.getOrDefault(false)
+            if (ok) postedAny = true
+        }
+        if (!postedAny) CAPSULE_PROBE_PENDING.remove(anchor)
+    }
+
+    /**
+     * 整树扫描（只观察、绝不改图）：收集全部文本与全部 ImageView 的
+     * 图信息。树内同时有「已连接」与我方名牌 → 记 treeprobe（图标位
+     * 类名 / 图种类 / 尺寸 / 祖先链），钉死图标位是什么 View、图怎么
+     * 交付；否则记 treemiss 并写明 nameFound / connectedFound，分清
+     * 是胶囊根本不在这棵树、还是文本还没绑齐。
+     */
+    private fun capsuleTreeProbeScan(anchor: android.view.View, via: String, frame: Int) {
+        runCatching {
+            if (!anchor.isAttachedToWindow) {
+                capsuleLog(
+                    "treemiss|$via|detached",
+                    "treeprobe miss via=$via frame=$frame reason=detached"
+                )
+                return@runCatching
+            }
+            var root: android.view.View = anchor
+            var depth = 0
+            while (depth < 20) {
+                val par = root.parent as? android.view.View ?: break
+                root = par
+                depth++
+            }
+            val texts = mutableListOf<String>()
+            val imgs = mutableListOf<String>()
+            var count = 0
+            fun dfs(v: android.view.View) {
+                if (++count > 240) return
+                if (v is android.widget.TextView) {
+                    v.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                        ?.let { texts.add(it.take(24)) }
+                }
+                if (v is android.widget.ImageView) {
+                    val d = v.drawable
+                    val size = if (d != null) "${d.intrinsicWidth}x${d.intrinsicHeight}" else "-"
+                    val bmp = (d as? android.graphics.drawable.BitmapDrawable)?.bitmap
+                        ?.let { " bmp=${it.width}x${it.height}" } ?: ""
+                    imgs.add(
+                        "${v.javaClass.simpleName}[kind=${capsuleDrawableKind(v, d)} " +
+                            "size=$size$bmp chain=${capsuleAncestorChain(v).take(140)}]"
+                    )
+                }
+                if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) dfs(v.getChildAt(i))
+                }
+            }
+            dfs(root)
+            val nameFound = texts.any { it == CAPSULE_OUR_NAME }
+            val connectedFound = texts.any { it == "已连接" }
+            if (nameFound && connectedFound) {
+                capsuleLog(
+                    "tree|$via|${imgs.joinToString(",").hashCode()}",
+                    "treeprobe via=$via frame=$frame root=${root.javaClass.simpleName} " +
+                        "texts=${texts.take(6)} imgs(${imgs.size})=${imgs.take(6)}"
+                )
+            } else {
+                capsuleLog(
+                    "treemiss|$via|$nameFound|$connectedFound|${root.javaClass.simpleName}",
+                    "treeprobe miss via=$via frame=$frame nameFound=$nameFound " +
+                        "connectedFound=$connectedFound root=${root.javaClass.simpleName} " +
+                        "texts=${texts.take(6)}"
+                )
+            }
+        }
+    }
+
+    /**
+     * 名牌后绑时序的多帧复核（3.0.17 由单帧改多帧）：post 当前帧 +
+     * 150ms + 500ms 各查一次，树内同时有我方名牌与「已连接」、且
+     * 当前图仍是耳塞图才换。每一帧落空都记一行原因（nameFound /
+     * connectedFound / 当前图类名），分清是时序未到还是判据根本
+     * 不齐；判据不齐一律不动图。
      */
     private fun capsuleDeferredRecheck(view: android.widget.ImageView, via: String) {
         if (!CAPSULE_PENDING.add(view)) return
-        val posted = runCatching {
-            view.post {
-                CAPSULE_PENDING.remove(view)
-                runCatching {
-                    if (!view.isAttachedToWindow) return@runCatching
-                    val cur = view.drawable ?: return@runCatching
-                    if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME) &&
-                        capsuleTreeContainsText(view, "已连接") &&
-                        isCapsuleEarbudDrawable(view, cur)
-                    ) {
-                        val head = loadCapsuleHeadphone(view) ?: return@runCatching
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun attempt(frame: Int, last: Boolean) {
+            runCatching {
+                if (done.get()) {
+                    if (last) CAPSULE_PENDING.remove(view)
+                    return@runCatching
+                }
+                if (!view.isAttachedToWindow) {
+                    capsuleLog(
+                        "defer|miss|$via|$frame|detached",
+                        "deferredMiss via=$via frame=$frame reason=detached"
+                    )
+                    if (last) CAPSULE_PENDING.remove(view)
+                    return@runCatching
+                }
+                val nameFound = capsuleTreeContainsText(view, CAPSULE_OUR_NAME)
+                val connectedFound = capsuleTreeContainsText(view, "已连接")
+                val cur = view.drawable
+                val earbud = cur != null && isCapsuleEarbudDrawable(view, cur)
+                if (nameFound && connectedFound && earbud) {
+                    val head = loadCapsuleHeadphone(view)
+                    if (head != null) {
                         CAPSULE_ICON_GUARD.set(true)
                         try { view.setImageDrawable(head) } finally {
                             CAPSULE_ICON_GUARD.set(false)
                         }
+                        done.set(true)
                         capsuleLog(
                             "defer|swap|$via",
-                            "deferredSwap via=$via chain=${capsuleAncestorChain(view)}"
+                            "deferredSwap via=$via frame=$frame " +
+                                "chain=${capsuleAncestorChain(view)}"
                         )
+                        if (last) CAPSULE_PENDING.remove(view)
+                        return@runCatching
                     }
                 }
+                capsuleLog(
+                    "defer|miss|$via|$frame|$nameFound|$connectedFound|" +
+                        "${cur?.javaClass?.simpleName}|$earbud",
+                    "deferredMiss via=$via frame=$frame nameFound=$nameFound " +
+                        "connectedFound=$connectedFound earbud=$earbud " +
+                        "drawable=${cur?.javaClass?.simpleName ?: "null"} " +
+                        "chain=${capsuleAncestorChain(view)}"
+                )
+                if (last) CAPSULE_PENDING.remove(view)
             }
-        }.getOrDefault(false)
-        if (!posted) CAPSULE_PENDING.remove(view)
+        }
+        val delays = longArrayOf(0L, 150L, 500L)
+        var postedAny = false
+        for (i in delays.indices) {
+            val last = i == delays.lastIndex
+            val r = Runnable { attempt(i, last) }
+            val ok = runCatching {
+                if (delays[i] <= 0L) view.post(r) else view.postDelayed(r, delays[i])
+            }.getOrDefault(false)
+            if (ok) postedAny = true
+        }
+        if (!postedAny) CAPSULE_PENDING.remove(view)
     }
 }
