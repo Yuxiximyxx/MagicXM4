@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.17-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.18-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.17-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.18-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,47 +64,48 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.17
-          name: MagicXM4 v3.0.17 — 胶囊图标探针补灵敏度（只观察，不动文案）
+          tag_name: v3.0.18
+          name: MagicXM4 v3.0.18 — 胶囊图标按探针实况换图（树扫描换位图位）
           body: |
-            ## MagicXM4 3.0.17（叠在 3.0.16 之上）
+            ## MagicXM4 3.0.18（叠在 3.0.17 之上）
 
-            本版只补胶囊图标探针的灵敏度，通知文案侧代码一个字未动。
+            本版按 3.0.17 探针钉死的实况修灵动岛胶囊图标；通知
+            文案侧代码一个字未动（正文问题已结案：16:20 真机
+            胶囊只剩「已连接 / WH-1000XM4」与 90% 电量环）。
 
-            背景（16:05 真机 LSPosed 日志已钉死）：3.0.16 的通知修复
-            其实已经生效——截图里那次「左耳 90% 右耳 --%」是 SystemUI
-            旧进程里 3.0.15 时代旧代码的最后一次发作（16:04:42），
-            3.0.16 新代码 16:04:45 已在新 SystemUI 进程装载完毕，
-            只改占位标题 → 名字、绝不产生电量行。真正没解决的是
-            胶囊图标：新进程里两个 ImageView 设图拦截全程零触发，
-            说明胶囊图标位不是经 setImageResource / setImageDrawable
-            设图的。
+            探针实况（LSPosed_20261110_162108，16:20:40，
+            SystemUI）：命中树 root=HnDynamicCardSetView、
+            texts=[已连接, WH-1000XM4]；树内设备图位是
+            HnCardLayout 子树里一颗 BitmapDrawable 140x140 的
+            ImageView —— 位图交付，所以 entry 名 /
+            ConstantState 两种认图全落空、setImage* 拦截也逮
+            不到交付时机（宿主先解码成 Bitmap 再交付）。
 
-            - 新增整树探针（只观察、绝不换图）：胶囊的名牌与
-              「已连接」文本必经 TextView.setText（旧改写实证命中
-              过这一路），在此触发对锚点所在窗口整棵树的扫描
-              （当前帧 + 150ms + 500ms 三帧）：树内同时有
-              「已连接」与「WH-1000XM4」时，记录全部 ImageView
-              的类名、图种类（耳塞 / 头戴 / 类名）、尺寸与祖先
-              链；不齐时记录 nameFound / connectedFound 落空
-              原因。结果仍落 magicxm4_diag_capsuleprobe 并打模块
-              日志，签名去重、上限由 24 放宽到 40。目标：钉死
-              胶囊图标位到底是什么 View、图是怎么交付的，下一版
-              按实况装门。
-            - 名牌后绑的延迟复核由单帧改多帧（当前帧 + 150ms +
-              500ms），每帧落空都记一行原因（nameFound /
-              connectedFound / 当前图类名）；换图判据与动作不变。
+            - 新增「胶囊树扫描换图」：锚点沿用探针同款
+              TextView.setText 观察（名牌 /「已连接」出现时），
+              对锚点所在窗口整棵树三帧扫描（当前帧 + 150ms +
+              500ms，与探针同节奏）；树内同时有「已连接」与
+              「WH-1000XM4」验明后，在 HnCardLayout 子树内找
+              BitmapDrawable 且 intrinsic 约 140x140 的那颗
+              ImageView，把图换成头戴图
+              device_icon_default_earphone（资源加载沿用既有
+              loadCapsuleHeadphone 逻辑）。命中打一行 treeSwap
+              日志（含图位祖先链与换前尺寸），仍落
+              magicxm4_diag_capsuleprobe。
+            - 只换这一颗位图位：同树的 RemotableAnimationImageView
+              （200x200，疑似动效层）只记进日志对照、本版不动
+              —— 若真机换完仍是耳塞图，下一轮按日志翻它。
+            - 不误伤：只有「已连接 + WH-1000XM4」同树才动手；
+              Free4 的胶囊树（名牌 OPPO Enco Free4）天然不
+              命中；其余通知树不碰。
 
-            其余全部不动：球图门、离线段否决、响铃摘除、入口
-            跳板、通知文案（含 3.0.16 的名字行处理）保持原样；
+            探针（treeprobe / treemiss / deferredMiss）与
+            3.0.16 的 setImage* 图标门保留不动；球图门、离线
+            段否决、响铃摘除、入口跳板、通知文案保持原样；
             全局 getDrawable hook 不复活。
 
-            签名与 3.0.16 同证书（SHA-256: 62F45C54…8C55），可
+            签名与 3.0.17 同证书（SHA-256: 62F45C54…8C55），可
             直接覆盖装。装后须强停 SystemUI 宿主进程（或等其
             重启）才加载新代码。
-
-            取证：装后连接 XM4 让胶囊出现一次即可，探针自动
-            记录；之后导一份 LSPosed 日志（看「胶囊图标
-            treeprobe」行）即可定位图标位。
 
           files: dist/*.apk

@@ -386,8 +386,12 @@ object SystemUIHeadsetIconHook : HookContext() {
     // CAPSULE_SEEN / CAPSULE_TOTAL：日志按签名去重封顶（沿用球阵探针纪律）。
     // CAPSULE_PENDING：已挂多帧复核的图标位（弱引用集合，防重复挂）。
     // CAPSULE_PROBE_PENDING：已挂整树探针扫描的锚点 TextView（同上）。
+    // CAPSULE_SWAP_PENDING：已挂整树换图扫描的锚点 TextView（同上）。
     // ★ 3.0.17：胶囊探针补灵敏度 —— 新增 setText 触发的整树扫描
     //   （capsuleTreeProbe*）与多帧复核的落空原因记录；换图判据不变。
+    // ★ 3.0.18：胶囊树扫描换图（capsuleTreeSwap*）—— 探针钉死图标位
+    //   是位图交付，改在文本绑齐后对 HnCardLayout 子树内的位图位
+    //   直接换图；探针与名牌门保留不动。
     private val CAPSULE_ICON_GUARD = object : ThreadLocal<Boolean>() {
         override fun initialValue(): Boolean = false
     }
@@ -397,6 +401,8 @@ object SystemUIHeadsetIconHook : HookContext() {
     private val CAPSULE_PENDING: MutableSet<android.view.View> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap())
     private val CAPSULE_PROBE_PENDING: MutableSet<android.view.View> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+    private val CAPSULE_SWAP_PENDING: MutableSet<android.view.View> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap())
     @Volatile private var capsuleCcResources: android.content.res.Resources? = null
 
@@ -629,6 +635,8 @@ object SystemUIHeadsetIconHook : HookContext() {
         //    命中胶囊的，日志实锤）。故在此按这两串文本触发整树
         //    扫描，钉死图标位是什么 View、图怎么交付。拦截一律
         //    原样 proceed，绝不改文本（文案侧 0/0b 的逻辑不碰）。
+        //    ★ 3.0.18 追记：探针已钉死图标位（见 capsuleTreeSwapScan
+        //    头注），同一锚点除探针外再调度一轮树扫描换图。
         runCatching {
             val m = Class.forName("android.widget.TextView").declaredMethods.first {
                 it.name == "setText" && it.parameterCount == 1 &&
@@ -640,6 +648,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                 val view = chain.thisObject as? android.widget.TextView
                 if (view != null && (t == CAPSULE_OUR_NAME || t == "已连接")) {
                     capsuleTreeProbeSchedule(view, "setText")
+                    capsuleTreeSwapSchedule(view, "setText")
                 }
                 ret
             }
@@ -647,7 +656,7 @@ object SystemUIHeadsetIconHook : HookContext() {
         }.onFailure {
             Log.w(TAG, "胶囊树探针 setText 装载失败: ${it.javaClass.simpleName}")
         }
-        capsuleDiag("installed=$installed/3 (3.0.17 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针)")
+        capsuleDiag("installed=$installed/3 (3.0.18 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针 + 树扫描换位图位)")
         Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/3)")
     }
 
@@ -751,6 +760,146 @@ object SystemUIHeadsetIconHook : HookContext() {
                         "texts=${texts.take(6)}"
                 )
             }
+        }
+    }
+
+    /**
+     * ★ 3.0.18 胶囊树扫描换图的调度：与整树探针同一锚点、同一节奏
+     * （当前帧 + 150ms + 500ms）。探针（LSPosed_20261110_162108，
+     * 16:20）已钉死：命中树 root=HnDynamicCardSetView，设备图位是
+     * HnCardLayout 子树内一颗 BitmapDrawable 140x140 的 ImageView
+     * —— 位图交付，entry 名 / ConstantState 认图全落空、setImage*
+     * 拦截也逮不到交付时机。故改在文本绑齐后直接对该位换图。
+     * 同一锚点只挂一轮（弱引用集合防重复挂）。
+     */
+    private fun capsuleTreeSwapSchedule(anchor: android.widget.TextView, via: String) {
+        if (!CAPSULE_SWAP_PENDING.add(anchor)) return
+        val done = java.util.concurrent.atomic.AtomicBoolean(false)
+        val delays = longArrayOf(0L, 150L, 500L)
+        var postedAny = false
+        for (i in delays.indices) {
+            val last = i == delays.lastIndex
+            val r = Runnable {
+                capsuleTreeSwapScan(anchor, via, i, done)
+                if (last) CAPSULE_SWAP_PENDING.remove(anchor)
+            }
+            val ok = runCatching {
+                if (delays[i] <= 0L) anchor.post(r) else anchor.postDelayed(r, delays[i])
+            }.getOrDefault(false)
+            if (ok) postedAny = true
+        }
+        if (!postedAny) CAPSULE_SWAP_PENDING.remove(anchor)
+    }
+
+    /**
+     * 树扫描换图（3.0.18）：锚点所在窗口整棵树同时含「已连接」与
+     * 我方名牌才动手 —— Free4 的胶囊树名牌是 OPPO Enco Free4，
+     * 天然不命中；其余通知树不碰。在 HnCardLayout 子树内找设备
+     * 图位：drawable 为 BitmapDrawable 且 intrinsic 约 140x140 的
+     * ImageView（探针实测的那颗静态设备图位）。只换这一颗；
+     * 同树的 RemotableAnimationImageView（200x200，疑似动效层）
+     * 只记进换图日志对照、本版不动 —— 若真机换完仍是耳塞图，
+     * 下一轮按日志翻它。命中后打一行 treeSwap（含图位祖先链与
+     * 换前尺寸），仍落 magicxm4_diag_capsuleprobe。
+     */
+    private fun capsuleTreeSwapScan(
+        anchor: android.view.View, via: String, frame: Int,
+        done: java.util.concurrent.atomic.AtomicBoolean
+    ) {
+        runCatching {
+            if (done.get()) return@runCatching
+            if (!anchor.isAttachedToWindow) {
+                capsuleLog(
+                    "swapmiss|$via|detached",
+                    "treeSwap miss via=$via frame=$frame reason=detached"
+                )
+                return@runCatching
+            }
+            var root: android.view.View = anchor
+            var depth = 0
+            while (depth < 20) {
+                val par = root.parent as? android.view.View ?: break
+                root = par
+                depth++
+            }
+            val texts = mutableListOf<String>()
+            var slot: android.widget.ImageView? = null
+            var animSeen = false
+            var count = 0
+            fun dfs(v: android.view.View, inCard: Boolean) {
+                if (++count > 240) return
+                val inside = inCard || v.javaClass.simpleName == "HnCardLayout"
+                if (v is android.widget.TextView) {
+                    v.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                        ?.let { texts.add(it) }
+                }
+                if (v is android.widget.ImageView) {
+                    if (v.javaClass.simpleName == "RemotableAnimationImageView") {
+                        animSeen = true
+                    }
+                    val d = v.drawable
+                    if (slot == null && inside &&
+                        d is android.graphics.drawable.BitmapDrawable
+                    ) {
+                        val w = d.intrinsicWidth
+                        val h = d.intrinsicHeight
+                        if (w in 120..160 && h in 120..160) slot = v
+                    }
+                }
+                if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) dfs(v.getChildAt(i), inside)
+                }
+            }
+            dfs(root, false)
+            val nameFound = texts.any { it == CAPSULE_OUR_NAME }
+            val connectedFound = texts.any { it == "已连接" }
+            if (!nameFound || !connectedFound) {
+                capsuleLog(
+                    "swapmiss|$via|$nameFound|$connectedFound|${root.javaClass.simpleName}",
+                    "treeSwap miss via=$via frame=$frame nameFound=$nameFound " +
+                        "connectedFound=$connectedFound root=${root.javaClass.simpleName}"
+                )
+                return@runCatching
+            }
+            val target = slot
+            if (target == null) {
+                capsuleLog(
+                    "swapmiss|$via|noslot|${root.javaClass.simpleName}",
+                    "treeSwap miss via=$via frame=$frame reason=noBitmapSlot " +
+                        "root=${root.javaClass.simpleName} animSeen=$animSeen"
+                )
+                return@runCatching
+            }
+            // 已是头戴图（上一轮换过）→ 收工，不重复换。
+            if (capsuleDrawableKind(target, target.drawable) == "headphone") {
+                done.set(true)
+                return@runCatching
+            }
+            val head = loadCapsuleHeadphone(target)
+            if (head == null) {
+                capsuleLog(
+                    "swapmiss|$via|nohead",
+                    "treeSwap miss via=$via frame=$frame reason=headphoneLoadFail"
+                )
+                return@runCatching
+            }
+            val pre = target.drawable
+            val preSize = if (pre != null) {
+                "${pre.intrinsicWidth}x${pre.intrinsicHeight}"
+            } else {
+                "-"
+            }
+            CAPSULE_ICON_GUARD.set(true)
+            try { target.setImageDrawable(head) } finally {
+                CAPSULE_ICON_GUARD.set(false)
+            }
+            done.set(true)
+            capsuleLog(
+                "treeswap|$via",
+                "treeSwap via=$via frame=$frame slot=BitmapDrawable size=$preSize " +
+                    "swapped=headphone animSeen=$animSeen " +
+                    "chain=${capsuleAncestorChain(target)}"
+            )
         }
     }
 
