@@ -508,7 +508,7 @@ object ControlCenterNoiseHook : HookContext() {
                     val size = (ret as? List<*>)?.size
                     Log.w(TAG, "▶ createSections(config=$config) → size=$size")
                     diag("sections", "size=$size cls=" + (ret as? List<*>)?.joinToString(",") { it?.javaClass?.simpleName ?: "null" })
-                    // 卡片装配完成 → 延迟几次把离线收缩 + 图标替换跑一遍。
+                    // 卡片装配完成 → 延迟几次把离线收缩跑一遍（图标已不归这里管，见 3.0.10）。
                     // 断连时 updateEarphoneUIByOnlineType 不一定会触发，这里是唯一稳定的时机。
                     runCatching {
                         val ball = ourBallRef?.get()
@@ -612,13 +612,11 @@ object ControlCenterNoiseHook : HookContext() {
                     runCatching {
                         val v = chain.thisObject as? android.view.ViewGroup
                         if (v != null && v.childCount > 0) {
-                            // 球先出现 → 立刻换球图标（用户抱怨「点进去再退出才变头戴」就是缺这一步）
-                            val ballName = findByIdName(v, "device_ball_name") as? android.widget.TextView
-                            if (ballName?.text?.toString()?.trim() == OUR_NAME) {
-                                listOf(0L, 120L, 400L, 1000L).forEach { d ->
-                                    v.postDelayed({ runCatching { fixBallIcon(v.rootView) } }, d)
-                                }
-                            }
+                            // ★ 3.0.10：球图标不在这里事后换了 —— 改走宿主选图入口的
+                            //   同步改结果（onHook 第 12 节）。原先 attach 后
+                            //   0/120/400/1000ms 的 postDelayed 换图全撤：迟到的
+                            //   换图撞上展开 morph 的测量/飞行，正是「先变大
+                            //   再缩小」的来源。
                             val nameView = findByIdName(v, "device_name") as? android.widget.TextView
                             if (nameView?.text?.toString()?.trim() == OUR_NAME) {
                                 val online = isOurConnected()
@@ -646,6 +644,8 @@ object ControlCenterNoiseHook : HookContext() {
             //   自绘的 ic_headphone 矢量图，大小/位置/动画都与宿主原生对不上。3.0.8 起
             //   球图标改由 fixBallIcon 在视图树上换成宿主自带的 device_icon_default_earphone
             //   （原生头戴位图），此处不再拦截任何 ImageView 设置入口。
+            //   【3.0.10 追记】fixBallIcon 亦已退役：球图标改在第 12 节的选图
+            //   入口同步改结果，模块从不在绘制后换球的图。
 
             // ── 11c) ★ FIX-005：让「响铃查找」可点 ──
             //   DeviceServiceCardAdapter.updateEarphoneUIByOnlineType(boolean) 会按在线态
@@ -674,10 +674,9 @@ object ControlCenterNoiseHook : HookContext() {
                         if (self != null) {
                             if (findTextView(self, OUR_NAME) != null) {
                                 ourBallRef = java.lang.ref.WeakReference(self)
-                                // 宿主刷新球状态时会重设图标 → 这里补一次，避免「放一会儿又变回耳塞」
-                                listOf(0L, 150L, 500L).forEach { d ->
-                                    self.postDelayed({ runCatching { fixBallIcon(self.rootView) } }, d)
-                                }
+                                // ★ 3.0.10：宿主刷新球状态重设图标时，选图 hook 会在它
+                                //   取图的那一次调用内同步改回头戴图，不再需要这里
+                                //   postDelayed 事后补换（原 0/150/500ms 已全撤）。
                             }
                             listOf(0L, 300L, 900L, 2000L).forEach { d ->
                                 self.postDelayed({ cleanupCard(self.rootView) }, d)
@@ -696,6 +695,34 @@ object ControlCenterNoiseHook : HookContext() {
             }.onFailure {
                 Log.w(TAG, "响铃查找 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
                 diag("hook_finddevice", "fail: ${it.javaClass.simpleName}: ${it.message}")
+            }
+
+            // ── 12) ★ 3.0.10：球图标改在宿主选图入口同步改结果（弃视图树手术）──
+            //   3.0.8/3.0.9 的 fixBallIcon 靠 attach / 状态刷新的 postDelayed
+            //   （0/120/400/1000ms、0/150/500ms）在绘制后换 drawable —— 展开
+            //   卡片的 morph 链（点球 → 球飞行放大成卡片）全程按宿主 initIcon
+            //   选定的那张图做测量与飞行，迟到的换图一律在飞行中被重新测量，
+            //   就是真机录屏里的「点开球还是先变大再缩小」（3.0.9 把判定收窄
+            //   到球本体、加了动画窗口跳过也没堵住：判定再准，换图时机本身
+            //   就是错的）。
+            //   MagicPods v2.10.6 资源潜行实证：球的图是宿主
+            //   BasicDeviceBallView.initIcon 用资源 API（ImageView.setImage
+            //   Resource / Resources.getDrawable）在 device_icon_default_
+            //   earphone / device_icon_in_ear_earphone_shadow /
+            //   device_icon_semi_in_ear_earphone_shadow 三张里选的。
+            //   本版改为 hook 这批交付入口（详见 installBallIconHook）：调用
+            //   属于 XM4 的球时，在同一次调用内把资源换成宿主头戴图
+            //   device_icon_default_earphone —— 绘制前同步生效，宿主的测量、
+            //   缓存、morph 动画从头到尾只见过这一张图；模块从不在绘制后
+            //   换球的图。initIcon 的确切签名/取图组合不在静态材料里
+            //   （潜行只记录到「经由资源 API 取三张图」），故三个入口全挂，
+            //   并在装载时把球的图标相关方法面打进 diag 备查。
+            runCatching {
+                installBallIconHook()
+                Log.i(TAG, "installed: 球图标选图同步改结果 [3.0.10]")
+            }.onFailure {
+                Log.w(TAG, "球图标选图 hook 装载失败: ${it.javaClass.simpleName}: ${it.message}")
+                diag("hook_ballicon", "fail: ${it.javaClass.simpleName}: ${it.message}")
             }
 
             // ── 11d) ★ FIX-005：「更多设置」点了没反应 —— 自己拉起蓝牙详情页 ──
@@ -1619,111 +1646,324 @@ object ControlCenterNoiseHook : HookContext() {
         diag("noise_sec", "online=$online -> ${if (online) "VISIBLE" else "GONE"}")
     }
 
+    // ── ★ 3.0.10：球图标选图 hook 的状态 ─────────────────────
+    // BALL_ICON_GUARD：交付入口自己也会再次进入被 hook 的入口（hook 内以
+    //   头戴图 id 重新 proceed 时），靠它防递归（资源 id 判定本身也会跳过
+    //   头戴图，双保险）。
+    // BALL_ICON_SEEN / BALL_ICON_TOTAL：命中日志按 (入口|资源名) 去重封顶。
+    // BALL_REGISTRY：BasicDeviceBallView 构造时登记的弱引用表 ——
+    //   getDrawable 这类全局入口拿不到 receiver 视图，只能靠「调用栈里有
+    //   BasicDeviceBallView + 在场的球里有 XM4 的球」双重限定作用域，
+    //   登记表就是后者的依据。球的实例在 initIcon 执行前必然已构造，
+    //   登记不依赖任何时序猜测。
+    private val BALL_ICON_GUARD = object : ThreadLocal<Boolean>() {
+        override fun initialValue(): Boolean = false
+    }
+    private val BALL_ICON_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val BALL_ICON_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val BALL_REGISTRY: MutableSet<Any> =
+        java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
+        )
+
+    // 宿主三张球图的资源 id（按 entry 名从宿主资源表查，不写死数值；
+    //   资源 id 全进程通用，首次查到后缓存）。[0]=default（头戴目标图）
+    //   [1]=in_ear [2]=semi_in_ear —— 后两者命中才需要改。
+    @Volatile private var ballIconIds: IntArray? = null
+
+    private fun ballIconIds(res: android.content.res.Resources): IntArray? {
+        ballIconIds?.let { return it }
+        val pkg = "com.hihonor.controlcenter"
+        val names = arrayOf(
+            "device_icon_default_earphone",
+            "device_icon_in_ear_earphone_shadow",
+            "device_icon_semi_in_ear_earphone_shadow"
+        )
+        val ids = IntArray(3)
+        for (i in names.indices) {
+            ids[i] = res.getIdentifier(names[i], "drawable", pkg)
+            if (ids[i] == 0) return null
+        }
+        ballIconIds = ids
+        return ids
+    }
+
     /**
-     * ★ 3.0.8：球图标改走宿主原生头戴图，弃用自绘矢量（ic_headphone 已删）。
-     *
-     * 以前为什么不对：自绘的是 24dp 矢量，塞进球位后靠手算 setBounds
-     * （intrinsic × 1.6 之类）硬撑尺寸——大小、锚点、宿主给原生图的
-     * 入场/刷新动画全对不上，球和展开卡片都别扭。
-     *
-     * 宿主自己的图（MagicPods v2.10.7/2.10.8 在同机构建上实证）：
-     *   - 展开卡片卡头（device_icon）：原生就是 device_icon_default_earphone
-     *     （504×504 位图，画的正是头戴式）→ 本模块什么都不用做，
-     *     撤掉原先对 device_icon 的覆盖即为原生效果。
-     *     （★ 3.0.9 更正：3.0.8 时卡头实际仍被本函数经 belongsToOurBall 的
-     *     宽判定误换，断开态撑成写实大图；判定收窄后才真正零干预，
-     *     根因详见 belongsToOurBall。）
-     *   - 设备球（BasicDeviceBallView.initIcon）：对 Third 类设备在
-     *     default / in_ear / semi_in_ear 三张里挑，挑中的是耳塞家族图 →
-     *     XM4 是头戴，这里只把属于我们那颗球的 icon_image_view 换成宿主
-     *     自己的 device_icon_default_earphone：同为宿主位图、按
-     *     ConstantState 判定、不碰 bounds/scale，尺寸/位置/动画与宿主
-     *     原生头戴设备完全一致。
-     *   ConstantState 已命中 default 的直接跳过 → 只有宿主刷新把图重设回
-     *   耳塞图时才再换，平时不反复 setImageDrawable 打断动画。
-     *
-     * 为什么按树找而不是挂 hook：球的图标可能在模块 hook 装好之前就已经
-     * 设过一次，之后再没人调用 setImageDrawable，hook 永远等不到。
-     * 直接改视图树最稳（沿用原触发时机：挂载/在线态刷新/卡片清理时调用）。
+     * ★ 3.0.10：这颗球（BasicDeviceBallView 实例）是不是我们 XM4 的 —— 供
+     * 选图 hook 在宿主取图的那一次调用内同步判定。判据与模块注入 DeviceInfo
+     * 的身份一致（initIcon 执行时球的 device_ball_name 可能还没绑定，故
+     * 不以文案为主判据）：
+     *   1. 球所持 DeviceInfo（先扫球本类的 DeviceInfo 类型字段，再走
+     *      getBasicDeviceBallViewAdapter 链上的 getDeviceInfo /
+     *      getBasicDeviceInfo 方法名候选）：id 命中 [isOurMac]，或名字
+     *      字段 == OUR_NAME；
+     *   2. 兜底：球子树里的 device_ball_name 文案 == OUR_NAME（绑名之后
+     *      的再次选图也能命中）。
+     * 任一命中即是。全程 runCatching：宿主结构有变时退化为「不是我们的
+     * 球」→ 不干预，绝不影响宿主原生流程。
      */
-    private fun fixBallIcon(root: android.view.View) {
-        // ★ 3.0.9 动画保险：作用域里已出现我方展开卡（device_name == OUR_NAME）
-        //   时，本轮整体跳过，一张图都不许换。
-        //   因果：点球展开卡片走的是 morph 动画，createDeviceCard 的 0ms 与后续
-        //   postDelayed 触发点正落在动画窗口内 —— 此刻把卡头图误换成
-        //   device_icon_default_earphone 的 504 原始位图，图标先骤然变大，
-        //   随后宿主重新测量、动画收束又缩回正常，就是真机录屏里的
-        //   「展开时图标先变大、再变小」的跳变。收窄判定（belongsToOurBall
-        //   只认球）堵住了误换本身，这里再兜一层：我方卡片在场（含展开中）
-        //   时动画驱动的视图树一律不碰。球的图标在点开之前早已由更早的
-        //   触发点换好，不依赖动画窗口内的调用；createDeviceCard /
-        //   cleanupCard 对 rootView 的调用同样受这条约束。
-        val cardName = findByIdName(root, "device_name") as? android.widget.TextView
-        if (cardName != null && cardName.text?.toString()?.trim() == OUR_NAME) {
-            diag("icon", "我方卡片在场（展开中/已展开），本轮跳过换图")
-            return
-        }
-        val ballId = root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
-        if (ballId == 0) {
-            diag("icon", "id=0")
-            return
-        }
-        val res = root.resources
-        val defId = res.getIdentifier("device_icon_default_earphone", "drawable", "com.hihonor.controlcenter")
-        if (defId == 0) {
-            diag("icon", "device_icon_default_earphone 未找到")
-            return
-        }
-        val defCs = runCatching { res.getDrawable(defId, null)?.constantState }.getOrNull()
-        var hit = 0
-        val stack = ArrayDeque<android.view.View>()
-        stack.addLast(root)
-        while (stack.isNotEmpty()) {
-            val v = stack.removeLast()
-            if (v.id == ballId && v is android.widget.ImageView && belongsToOurBall(v)) {
-                val cs = runCatching { v.drawable?.constantState }.getOrNull()
-                if (defCs == null || (cs !== defCs && cs != defCs)) {
-                    val nd = runCatching { res.getDrawable(defId, null) }.getOrNull()
-                    if (nd != null) {
-                        v.setImageDrawable(nd)
-                        hit++
+    private fun isOurBallView(ball: Any?): Boolean {
+        if (ball == null) return false
+        runCatching {
+            val infoCls = findClass("com.hihonor.controlviewnew.info.DeviceInfo")
+            var info: Any? = null
+            for (f in ball.javaClass.declaredFields) {
+                if (f.type == infoCls) {
+                    f.isAccessible = true
+                    info = f.get(ball)
+                    if (info != null) break
+                }
+            }
+            if (info == null) {
+                val adapter = runCatching {
+                    ball.javaClass.methods.firstOrNull {
+                        it.name == "getBasicDeviceBallViewAdapter" && it.parameterCount == 0
+                    }?.invoke(ball)
+                }.getOrNull()
+                if (adapter != null) {
+                    for (mn in listOf("getDeviceInfo", "getBasicDeviceInfo")) {
+                        info = runCatching {
+                            adapter.javaClass.methods.firstOrNull {
+                                it.name == mn && it.parameterCount == 0
+                            }?.invoke(adapter)
+                        }.getOrNull()
+                        if (info != null) break
                     }
                 }
             }
-            if (v is android.view.ViewGroup) {
-                for (i in 0 until v.childCount) stack.addLast(v.getChildAt(i))
+            if (info != null) {
+                val id = runCatching {
+                    info.javaClass.getMethod("getId").invoke(info)?.toString()
+                }.getOrNull()
+                if (isOurMac(id)) return true
+                val name = runCatching {
+                    info.javaClass.getMethod("getName").invoke(info)?.toString()
+                }.getOrNull()
+                if (name?.trim() == OUR_NAME) return true
             }
         }
-        if (hit > 0) diag("icon", "球图标已换宿主原生头戴图 $hit 处")
+        val v = ball as? android.view.View ?: return false
+        val nameView = findByIdName(v, "device_ball_name") as? android.widget.TextView
+        return nameView?.text?.toString()?.trim() == OUR_NAME
     }
 
-    /** 从图标 View 往上找，看这个球的名字是不是我们的设备名。 */
-    private fun belongsToOurBall(icon: android.view.View): Boolean {
-        // ★ 3.0.9 收窄：锚点只认球自己的 `device_ball_name`，不再认卡片头部的
-        //   `device_name`。3.0.8 的根因正在于此：fixBallIcon 从 rootView 全树
-        //   遍历所有 icon_image_view，旧判定两个名字都认 —— 卡头那张图的
-        //   ImageView 与卡头 device_name 在同一子树，于是被误判成「球的图标」，
-        //   被换成 device_icon_default_earphone 的原始 504 位图且不设
-        //   bounds/scaleType；展开卡片断开态布局下就撑成一张白色写实大图，
-        //   把 3.0.8「卡头完全恢复宿主原生、模块零干预」的方针架空了。
-        //   （连接态观感正常只是该位图被在线布局的容器约束住了，并非没被换。）
-        //   额外保险：往上爬时若某一层先出现 `device_name`（卡片子树特征）
-        //   而还没遇到 device_ball_name，说明身处卡片子树，直接判否。
-        // 精确判定：从图标往上，第一个能找到 `device_ball_name` 的层级就是这颗球本身，
-        // 直接读它的名字 —— 比「子树里有没有 OUR_NAME」可靠得多
-        // （球是在同一个 RecyclerView 里，往上爬两层就能看见别的球，会误伤）。
-        var node: android.view.View? = icon
-        var depth = 0
-        while (node != null && depth < 8) {
-            val ballName = findByIdName(node, "device_ball_name") as? android.widget.TextView
-            if (ballName != null) {
-                return ballName.text?.toString()?.trim() == OUR_NAME
-            }
-            if (findByIdName(node, "device_name") != null) return false
-            node = node.parent as? android.view.View
-            depth++
+    /** 调用栈里有没有 BasicDeviceBallView 在取图（getDrawable 入口的作用域限定一）。 */
+    private fun stackHasBall(): Boolean {
+        val ballClsName = "com.hihonor.controlviewnew.widget.BasicDeviceBallView"
+        return Thread.currentThread().stackTrace.any {
+            it.className == ballClsName || it.className.startsWith("$ballClsName$")
         }
-        return false
+    }
+
+    /** 在场的球里有没有 XM4 的（getDrawable 入口的作用域限定二）。 */
+    private fun anyOurBallPresent(): Boolean {
+        val snapshot: List<Any>
+        synchronized(BALL_REGISTRY) { snapshot = BALL_REGISTRY.toList() }
+        return snapshot.any { isOurBallView(it) }
+    }
+
+    private fun logBallIconHit(where: String, fromName: String) {
+        val sig = "$where|$fromName"
+        if (BALL_ICON_SEEN.add(sig) && BALL_ICON_TOTAL.incrementAndGet() <= 20) {
+            Log.w(TAG, "★ 球图标选图同步改: $where $fromName → device_icon_default_earphone")
+            diag("icon", "$where $fromName -> default_earphone（3.0.10 同步改结果）")
+        }
+    }
+
+    /**
+     * ★ 3.0.10：装载球图标选图 hook —— 在宿主取图的那一次调用内同步把
+     * 结果换成宿主头戴图 device_icon_default_earphone（机制与来由见
+     * onHook 第 12 节）。fixBallIcon 的视图树手术 + 全部 postDelayed
+     * 触发已在本版整体退役：模块从不在绘制后换球的图。
+     *
+     * 三个交付入口（MagicPods v2.10.6 资源潜行实证球经由它们取图）：
+     *   a) ImageView.setImageResource(int)：receiver 就是球的图标位，
+     *      往上找到所属的 BasicDeviceBallView、是 XM4 的球才把入参
+     *      换成头戴图 id 再 proceed —— 判定最准，是主路径；
+     *   b) Resources.getDrawable(int) / (int, Theme)：全局入口、没有
+     *      receiver 视图，靠 stackHasBall() + anyOurBallPresent()
+     *      双重限定，命中后把入参换成头戴图 id 再 proceed（返回的
+     *      就是头戴图，宿主全程只见过它）；
+     *   c) Context.getDrawable(int)：同 b) 的限定与处理（宿主可能经
+     *      ContextImpl / ContextWrapper 取图，两层都挂）。
+     * 三个入口都只认「入参是 in_ear / semi_in_ear 两张耳塞图之一」才
+     * 介入；头戴图本身、其他任何资源一律原样放行。
+     * 另 hook BasicDeviceBallView 的全部构造器做弱引用登记（见
+     * BALL_REGISTRY），并把球的图标相关方法面打进 diag 备查
+     * （initIcon 的确切签名不在静态材料里，以真机日志为准）。
+     * 单点失败各自记日志，不拖垮其他 hook。
+     */
+    private fun installBallIconHook() {
+        val ballCls = findClass("com.hihonor.controlviewnew.widget.BasicDeviceBallView")
+
+        // 备查：球的图标相关方法面（initIcon 的确切签名以真机此行为准）。
+        runCatching {
+            val sb = StringBuilder()
+            for (m in ballCls.declaredMethods.sortedBy { it.name }) {
+                val n = m.name.lowercase()
+                if (n.contains("icon") || n.contains("image") || n.contains("init")) {
+                    sb.append(m.name).append('(')
+                        .append(m.parameterTypes.joinToString(",") { it.simpleName })
+                        .append(");")
+                }
+            }
+            diag("initicon_surface", sb.toString())
+        }
+
+        // 0) 球构造登记（弱引用）：供 getDrawable 入口判「在场有我们的球」。
+        var ctorHooked = 0
+        for (ctor in ballCls.declaredConstructors) {
+            runCatching {
+                ctor.isAccessible = true
+                module.hook(ctor).intercept { chain ->
+                    val ret = chain.proceed()
+                    runCatching { chain.thisObject?.let { BALL_REGISTRY.add(it) } }
+                    ret
+                }
+                ctorHooked++
+            }
+        }
+        Log.i(TAG, "球图标选图: BasicDeviceBallView 构造登记 $ctorHooked 个")
+
+        // a) ImageView.setImageResource(int)
+        runCatching {
+            val m = android.widget.ImageView::class.java
+                .getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                if (BALL_ICON_GUARD.get()) return@intercept chain.proceed()
+                val view = chain.thisObject as? android.widget.ImageView
+                val resIdArg = (chain.args.getOrNull(0) as? Int) ?: 0
+                if (view != null && resIdArg != 0) {
+                    val ids = runCatching { ballIconIds(view.resources) }.getOrNull()
+                    if (ids != null && resIdArg != ids[0] &&
+                        (resIdArg == ids[1] || resIdArg == ids[2])
+                    ) {
+                        var node: android.view.View? = view
+                        var ball: android.view.View? = null
+                        var depth = 0
+                        while (node != null && depth < 12) {
+                            if (node.javaClass.name ==
+                                "com.hihonor.controlviewnew.widget.BasicDeviceBallView"
+                            ) {
+                                ball = node
+                                break
+                            }
+                            node = node.parent as? android.view.View
+                            depth++
+                        }
+                        if (ball != null && isOurBallView(ball)) {
+                            BALL_ICON_GUARD.set(true)
+                            try {
+                                val fromName = runCatching {
+                                    view.resources.getResourceEntryName(resIdArg)
+                                }.getOrDefault("id$resIdArg")
+                                logBallIconHit("setImageResource", fromName)
+                                val newArgs = chain.args.toTypedArray()
+                                newArgs[0] = ids[0]
+                                return@intercept chain.proceed(newArgs)
+                            } finally {
+                                BALL_ICON_GUARD.set(false)
+                            }
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+            Log.i(TAG, "球图标选图: ImageView.setImageResource OK")
+        }.onFailure {
+            Log.w(TAG, "球图标选图: setImageResource 装载失败: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
+        // b) Resources.getDrawable(int) / (int, Theme)
+        for (withTheme in listOf(false, true)) {
+            runCatching {
+                val m = if (withTheme) {
+                    android.content.res.Resources::class.java.getDeclaredMethod(
+                        "getDrawable", Int::class.javaPrimitiveType,
+                        android.content.res.Resources.Theme::class.java
+                    )
+                } else {
+                    android.content.res.Resources::class.java.getDeclaredMethod(
+                        "getDrawable", Int::class.javaPrimitiveType
+                    )
+                }
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    if (BALL_ICON_GUARD.get()) return@intercept chain.proceed()
+                    val resIdArg = (chain.args.getOrNull(0) as? Int) ?: 0
+                    val res = chain.thisObject as? android.content.res.Resources
+                    if (res != null && resIdArg != 0) {
+                        val ids = runCatching { ballIconIds(res) }.getOrNull()
+                        if (ids != null && resIdArg != ids[0] &&
+                            (resIdArg == ids[1] || resIdArg == ids[2]) &&
+                            stackHasBall() && anyOurBallPresent()
+                        ) {
+                            BALL_ICON_GUARD.set(true)
+                            try {
+                                val fromName = runCatching {
+                                    res.getResourceEntryName(resIdArg)
+                                }.getOrDefault("id$resIdArg")
+                                logBallIconHit(
+                                    if (withTheme) "getDrawable/Theme" else "getDrawable",
+                                    fromName
+                                )
+                                val newArgs = chain.args.toTypedArray()
+                                newArgs[0] = ids[0]
+                                return@intercept chain.proceed(newArgs)
+                            } finally {
+                                BALL_ICON_GUARD.set(false)
+                            }
+                        }
+                    }
+                    chain.proceed()
+                }
+                Log.i(TAG, "球图标选图: Resources.getDrawable${if (withTheme) "(int,Theme)" else "(int)"} OK")
+            }.onFailure {
+                Log.w(TAG, "球图标选图: Resources.getDrawable 装载失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+
+        // c) Context.getDrawable(int)：ContextImpl / ContextWrapper 两层
+        for (clsName in listOf("android.app.ContextImpl", "android.content.ContextWrapper")) {
+            runCatching {
+                val m = Class.forName(clsName).getDeclaredMethod(
+                    "getDrawable", Int::class.javaPrimitiveType
+                )
+                m.isAccessible = true
+                module.hook(m).intercept { chain ->
+                    if (BALL_ICON_GUARD.get()) return@intercept chain.proceed()
+                    val resIdArg = (chain.args.getOrNull(0) as? Int) ?: 0
+                    val ctx = chain.thisObject as? android.content.Context
+                    if (ctx != null && resIdArg != 0) {
+                        val ids = runCatching { ballIconIds(ctx.resources) }.getOrNull()
+                        if (ids != null && resIdArg != ids[0] &&
+                            (resIdArg == ids[1] || resIdArg == ids[2]) &&
+                            stackHasBall() && anyOurBallPresent()
+                        ) {
+                            BALL_ICON_GUARD.set(true)
+                            try {
+                                val fromName = runCatching {
+                                    ctx.resources.getResourceEntryName(resIdArg)
+                                }.getOrDefault("id$resIdArg")
+                                logBallIconHit("Context.getDrawable", fromName)
+                                val newArgs = chain.args.toTypedArray()
+                                newArgs[0] = ids[0]
+                                return@intercept chain.proceed(newArgs)
+                            } finally {
+                                BALL_ICON_GUARD.set(false)
+                            }
+                        }
+                    }
+                    chain.proceed()
+                }
+                Log.i(TAG, "球图标选图: $clsName.getDrawable OK")
+            }.onFailure {
+                Log.w(TAG, "球图标选图: $clsName.getDrawable 装载失败: ${it.javaClass.simpleName}: ${it.message}")
+            }
+        }
+        diag("hook_ballicon", "installed（3.0.10 同步改结果）")
     }
 
     /**
@@ -1785,8 +2025,9 @@ object ControlCenterNoiseHook : HookContext() {
 
     private fun cleanupCard(root: android.view.View?) {
         if (root == null) return
-        // 球图标：直接在当前窗口里按 id 找到我们那颗球的图标并替换（不依赖任何 hook 时序）。
-        runCatching { fixBallIcon(root) }.onFailure { Log.w(TAG, "fixBallIcon 失败: ${it.message}") }
+        // ★ 3.0.10：球图标不在这里换了 —— fixBallIcon 视图树手术整体退役，
+        //   改走宿主选图入口同步改结果（onHook 第 12 节）。卡片清理只管它
+        //   本来的事（隐藏无用行等），不再碰任何图标。
         // 卡片真的画出来了 = 宿主进程已经活透，此时拿 Context 最稳。
         HonorAssetsDump.dump(currentApp())
         var hidden = 0
