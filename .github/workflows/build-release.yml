@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.21-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.22-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.21-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.22-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,43 +64,45 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.21
-          name: MagicXM4 v3.0.21 — 窗口扫描探针（事件驱动取证，只记不换）
+          tag_name: v3.0.22
+          name: MagicXM4 v3.0.22 — 窗口扫描探针（武装改双路，只记不换）
           body: |
-            ## MagicXM4 3.0.21（叠在 3.0.20 之上）
+            ## MagicXM4 3.0.22（叠在 3.0.21 之上）
 
-            仍是纯取证版：只记不换。但换了取证方法 ——
-            3.0.20 沿 ImageView.setImage* 入口蹲守「小胶囊
-            探针」在真机零命中（新码确认在跑、展开卡那轮未
-            出现），结论：收起态小胶囊的图不是经 setImage*
-            递进来的（或连接瞬间模块的连接门未成立），蹲
-            设图入口这条路走不通。
+            仍是纯取证版：只记不换。本版**只改窗口扫描探针
+            （winProbe）的武装方式**，扫描本体（全窗口 DFS
+            与记录格式）一个字未动；animSwap / treeSwap /
+            文案 / 名牌门全部原样。
 
-            本版改事件驱动 + 全窗口定版扫描（新探针
-            「窗口扫描」，落键 magicxm4_diag_winprobe）：
-            - 触发源：既有 A2DP 广播接收器的 CONNECTED
-              分支（设备已过 isOriGPod 验明）与开机恢复
-              路径，在连接事件后 800ms / 2500ms 各扫一次；
-              同一轮连接只武装一次。
-            - 扫描面：经 WindowManagerGlobal 枚举 SystemUI
-              全部根视图逐棵 DFS，记录每颗 ImageView 的图
-              种类（含耳塞同源判定）/ 尺寸 / 屏幕坐标 /
-              祖先链，以及每棵树的 TextView 文本概览；
-              耳塞同源图加 EARBUD 标记、屏幕顶部
-              （y<200px）的图位加 TOP 标记 —— 收起态小
-              胶囊就在状态栏顶部。
-            - 结果分段写 magicxm4_diag_winprobe（带序号），
-              并逐行打进 LSPosed 日志（标「▶ 窗口扫描」）；
-              签名去重防刷屏。
+            3.0.21 为何零产出（真机日志已判）：新码在跑、
+            展开卡 animSwap 本轮正常命中，但 winProbe 零
+            记录 —— 这轮连接全程抖动，A2DP 广播序列只有
+            CONNECTING → DISCONNECTED → CONNECTING，
+            日志窗口内从未出现 CONNECTED；而 3.0.21 的武
+            装只挂在 CONNECTED 分支与开机恢复，两个武装
+            点都没赶上（开机恢复武装时连接门不成立也会
+            skip）。触发源选错，不是扫描坏了。
 
-            其余全部原样：animSwap / treeSwap 换图链、文案
-            代码、setImage* 名牌门、既有探针一律不动；
-            本版绝不改任何图标、任何文案。
+            本版武装改双路：
+            - 主武装：挂到常驻的 TextView.setText 观察拦
+              截上 —— SystemUI 里任意一次 setText 发生时，
+              若距上次武装已超过 6 秒就武装一轮，扫描在
+              约 300ms 后执行一次（扫描内部仍以 XM4 已
+              连接为门，不成立记一行 skip 原因）。只要界
+              面在动、XM4 连着，扫描必然周期性跑到，小
+              胶囊在顶部停留期间必被扫中。
+            - 副武装：A2DP 的 CONNECTING 分支也调
+              winProbeSchedule（CONNECTED 分支与开机恢
+              复保持原样），连接抖动期也能提前布防。
+            - 每轮武装 / skip / 扫描都在 LSPosed 日志留
+              可辨识标记（armed via=setText|a2dp），不再
+              出现「零记录不知为何」的盲区。去重与总量
+              上限沿用既有 WIN_SEEN 机制。
 
-            签名与 3.0.20 同证书（SHA-256: 62F45C54…8C55），
+            签名与 3.0.21 同证书（SHA-256: 62F45C54…8C55），
             可直接覆盖装。装后须强停 SystemUI 宿主进程才
-            加载新代码；重连一次 XM4、让收起态小胶囊在
-            顶部停留几秒，再导 LSPosed 日志看「▶ 窗口
-            扫描」行即可钉死小胶囊图标位，下一版按实况
-            装门。
+            加载新代码；重连 XM4、让收起态小胶囊在顶部
+            停留几秒，再导 LSPosed 日志看「▶ 窗口扫描」
+            行（重点找 EARBUD + TOP 标记）即可钉死小胶
+            囊图标位，下一版按实况装门。
           files: dist/*.apk

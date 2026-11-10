@@ -266,6 +266,12 @@ object SystemUIHeadsetIconHook : HookContext() {
                     // ★ 3.0.21 窗口扫描探针：连接事件驱动，延迟全窗口扫描取证。
                     winProbeSchedule(context, device)
                 }
+                BluetoothProfile.STATE_CONNECTING -> {
+                    // ★ 3.0.22 副武装放宽：连接抖动期（只到 CONNECTING、
+                    // 到不了 CONNECTED）也提前布防 —— 3.0.21 那轮连接
+                    // 全程抖动、从未出现 CONNECTED，武装点全落空零产出。
+                    winProbeSchedule(context, device)
+                }
                 BluetoothProfile.STATE_DISCONNECTED, BluetoothProfile.STATE_DISCONNECTING -> {
                     safeRemoveConnected(device.address)
                 }
@@ -687,11 +693,19 @@ object SystemUIHeadsetIconHook : HookContext() {
     // ImageView 的图种类（capsuleDrawableKind，内含耳塞同源判定）/
     // 尺寸/屏幕坐标/祖先链与每棵树的文本概览整段记录；位于顶部
     // （y<200px）的图位加 TOP 标记。仍然只记不换。
+    // ★ 3.0.22 追记：3.0.21 真机零产出 —— 那轮连接全程抖动，
+    // A2DP 只到 CONNECTING、从未到 CONNECTED，CONNECTED 与
+    // 开机恢复两个武装点全落空（触发源选错、不是扫描坏了）。
+    // 本版武装改双路：主武装 winProbeArmFromSetText 挂 setText
+    // 观察拦截（任意 setText＋6 秒节流，武装后 300ms 扫一次）；
+    // 副武装放宽到 A2DP 的 CONNECTING 分支也调 winProbeSchedule。
+    // 扫描本体（winProbeScan 的 DFS 与记录格式）未动。
     private val WIN_SEEN: MutableSet<String> =
         java.util.Collections.synchronizedSet(mutableSetOf())
     private val WIN_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
     private val WIN_SCAN_SEQ = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var winProbeArmed = false
+    @Volatile private var winProbeLastArmMs = 0L
 
     private fun winDiag(key: String, value: String) {
         runCatching {
@@ -714,10 +728,33 @@ object SystemUIHeadsetIconHook : HookContext() {
             val a = device?.address ?: "?"
             "$n@$a"
         }.getOrDefault("?")
-        Log.w(TAG, "▶ 窗口扫描 armed scan=$scanId dev=$devInfo conn=${isXm4Connected()}")
-        winDiag("magicxm4_diag_winprobe", "armed scan=$scanId dev=$devInfo")
+        Log.w(TAG, "▶ 窗口扫描 armed via=a2dp scan=$scanId dev=$devInfo conn=${isXm4Connected()}")
+        winDiag("magicxm4_diag_winprobe", "armed via=a2dp scan=$scanId dev=$devInfo")
         mainHandler.postDelayed({ winProbeScan(scanId, 800) }, 800)
         mainHandler.postDelayed({ winProbeScan(scanId, 2500) }, 2500)
+    }
+
+    /**
+     * ★ 3.0.22 主武装：挂在 setText 观察拦截上，任意一次 setText
+     * 都顺带问一句 —— 距上次武装超过 6 秒才真正武装一轮，扫描在
+     * 300ms 后跑一次（扫描内部仍以 isXm4Connected 为门，不成立
+     * 记一行 skip 原因）。零依赖连接状态：只要 SystemUI 界面在
+     * 动、XM4 连着，扫描必然周期性跑到，小胶囊在顶部停留期间
+     * 必被扫中。节流命中时不打日志，防 setText 高频刷屏。
+     */
+    private fun winProbeArmFromSetText() {
+        if (winProbeArmed) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - winProbeLastArmMs < 6000) return
+        winProbeLastArmMs = now
+        winProbeArmed = true
+        val scanId = WIN_SCAN_SEQ.incrementAndGet()
+        Log.w(TAG, "▶ 窗口扫描 armed via=setText scan=$scanId conn=${isXm4Connected()}")
+        winDiag("magicxm4_diag_winprobe", "armed via=setText scan=$scanId")
+        mainHandler.postDelayed({ winProbeScan(scanId, 300) }, 300)
+        // winProbeScan 只在 2500ms 帧卸防；本轮是单帧 300ms，
+        // 另排一个卸防把武装位让出来（扫描异常也不卡死武装位）。
+        mainHandler.postDelayed({ winProbeArmed = false }, 600)
     }
 
     /** 本进程全部窗口根视图：优先 mViews，回退 mRoots→getView()。 */
@@ -939,6 +976,9 @@ object SystemUIHeadsetIconHook : HookContext() {
         //    头注），同一锚点除探针外再调度一轮树扫描换图。
         //    ★ 3.0.20 追记：同锚点再调度一轮小胶囊被动观察
         //    （capsuleMiniTree*），只记非展开卡树里的耳塞图。
+        //    ★ 3.0.22 追记：同一拦截再兼窗口扫描探针的主武装
+        //    （winProbeArmFromSetText，任意 setText＋6 秒节流、
+        //    不看文本内容），见拦截内调用处。
         runCatching {
             val m = Class.forName("android.widget.TextView").declaredMethods.first {
                 it.name == "setText" && it.parameterCount == 1 &&
@@ -946,6 +986,10 @@ object SystemUIHeadsetIconHook : HookContext() {
             }.apply { isAccessible = true }
             module.hook(m).intercept { chain ->
                 val ret = chain.proceed()
+                // ★ 3.0.22：窗口扫描主武装挂在这里 —— 任意 setText
+                // 都问一句（内部 6 秒节流），不依赖文本内容与连接
+                // 状态，治 3.0.21 武装点全落空的盲区。
+                runCatching { winProbeArmFromSetText() }
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()?.trim()
                 val view = chain.thisObject as? android.widget.TextView
                 if (view != null && (t == CAPSULE_OUR_NAME || t == "已连接")) {
