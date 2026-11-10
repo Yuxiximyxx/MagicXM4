@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.15-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.16-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.15-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.16-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,38 +64,41 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.15
-          name: MagicXM4 v3.0.15 — 球阵页按探针实况装门（球根 DeviceBallView + 名牌主判据）
+          tag_name: v3.0.16
+          name: MagicXM4 v3.0.16 — 灵动岛胶囊图标换头戴（SystemUI 名牌门）
           body: |
-            ## MagicXM4 3.0.15（叠在 3.0.14 之上）
+            ## MagicXM4 3.0.16（叠在 3.0.15 之上）
 
-            3.0.14 探针已把全屏球阵页的实况钉死，本版按实况装门：
+            只修一个新面：XM4 已连接时，顶部灵动岛胶囊（「已连接 /
+            WH-1000XM4」+ 电量环）左侧图标是入耳式耳塞图，应为头戴式。
+            胶囊在 SystemUI 进程渲染、不走 DeviceBallView，球图门管不到；
+            且 XM4 注入的 DeviceInfo 与 Free4 同为 00VVD9 / Third，
+            胶囊按资源键取图区分不了两者，必须按设备身份介入。
 
-            - 球根类实测是 `DeviceBallView`，不是 3.0.13 findBallOf
-              硬编码的 `BasicDeviceBallView` 全名——旧门在任何界面都
-              找不到球根，这是 3.0.13 在球阵页漏换 XM4 的根因。
-              本版放宽类名匹配（simpleName == DeviceBallView、类名以
-              ".DeviceBallView" 结尾、或原 BasicDeviceBallView 全名，
-              任一命中即认），深度上限 16（图标位到球根实测 5 层）。
-            - 换图判据改以球根子树内的名牌 `device_ball_name` 文案
-              == WH-1000XM4 为主判据（探针实测在 setImageDrawable
-              时机可回读、能干净区分 XM4 与别家球），原 DeviceInfo
-              判据为备；任一正向命中才在同一次设图调用内换成头戴图
-              device_icon_default_earphone。名牌读不到/为空/别家名
-              且 DeviceInfo 也不命中 → 原样放行；没有祖先的独立
-              图标位（探针 root=none）同样放行。
-            - 每次换图命中额外打一行归因日志（球名牌 + 来源入口），
-              供下轮核对与 MagicPods 的交叉影响；3.0.14 探针保留、
-              行为不变。
+            - 在 SystemUI 的 ImageView.setImageResource /
+              setImageDrawable 两入口加名牌门：入参是耳塞家族图
+              （device_icon_in_ear / semi_in_ear_earphone_shadow，
+              资源 id 走 entry 名、Drawable 走 ConstantState 身份）
+              且图标位所属视图树内有设备名 TextView == WH-1000XM4
+              时，同一次调用内换成头戴图 device_icon_default_earphone
+              （优先图标位自己资源包的同名资源，没有再从
+              com.hihonor.controlcenter 包资源加载）。
+            - 名牌在设图之后才绑定的时序，补一次 post 单帧复核：
+              树内同时有「WH-1000XM4」与「已连接」、且当前图仍是
+              耳塞图才换。XM4 未连接时拦截零动作；Free4 的胶囊树里
+              是别的名字，天然不命中，别家胶囊一律不碰。
+            - 胶囊图标的静态来源定不死，本版同时留最小探针：命中与
+              落空都按签名去重落 magicxm4_diag_capsuleprobe 并打
+              模块日志（含祖先链），下一轮可按实况归因。
 
-            其余全部不动：3.0.11 离线段否决、3.0.12 响铃摘除与入口
-            跳板、文案门控保持原样；3.0.13 撤掉的全局 getDrawable
-            hook 不复活。
+            其余全部不动：球图门、离线段否决、响铃摘除、入口跳板、
+            文案门控保持原样；全局 getDrawable hook 不复活。
 
-            签名与 3.0.14 同证书（SHA-256: 62F45C54…8C55），可直接
-            覆盖装。
+            签名与 3.0.15 同证书（SHA-256: 62F45C54…8C55），可直接
+            覆盖装。装后须强停 SystemUI 宿主进程（或等其重启）才
+            加载新代码。
 
-            待真机验证：球阵页与下拉面板里 XM4 的球是头戴图、
-            FreeBuds / Enco 的球保持耳塞图，两边都不再翻转。
+            待真机验证：XM4 连接时顶部胶囊左侧是头戴图；Free4 连接
+            时胶囊仍是耳塞图、不受影响。
 
           files: dist/*.apk

@@ -138,6 +138,25 @@ object SystemUIHeadsetIconHook : HookContext() {
             Log.w(TAG, "install setText hook failed: ${it.javaClass.simpleName}: ${it.message}")
         }
 
+        // 0c. ★ 3.0.16：灵动岛胶囊图标换头戴（仅 XM4 本人）。
+        //    现象：XM4 已连接时顶部胶囊（「已连接 / WH-1000XM4」+ 电量环）
+        //    左侧图标是入耳式耳塞图。胶囊在 SystemUI 进程渲染、不走
+        //    DeviceBallView，3.0.15 的球图门管不到；胶囊按设备资源键取图，
+        //    XM4 注入的 DeviceInfo 与 Free4 同为 00VVD9 / Third_EarPhone，
+        //    光靠键区分不了，必须按设备身份介入。做法（详见
+        //    installCapsuleIconHook）：在 SystemUI 的 ImageView 设图入口，
+        //    入参是耳塞家族图、且图标位所属视图树内有设备名 TextView ==
+        //    WH-1000XM4 时，同一次调用内换成头戴图；名牌后绑定的时序下
+        //    补一次 post 单帧复核（须同时有「已连接」+ 我方名牌才换）。
+        //    XM4 未连接时拦截零动作；定不死的来源由探针落
+        //    magicxm4_diag_capsuleprobe 供下一轮归因。
+        runCatching {
+            installCapsuleIconHook()
+            Log.i(TAG, "installed: 胶囊图标换图 [3.0.16 名牌门]")
+        }.onFailure {
+            Log.w(TAG, "install capsule icon hook failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+
         // 1. 找 SystemUI 启动时机
         // MagicOS 的 SystemUI 里没有 CentralSurfacesImpl / SystemUIApplication / SystemUI
         // （真机 dexdump 确认），原来固定 hook CentralSurfacesImpl.start 必然 findClass 抛异常。
@@ -365,5 +384,277 @@ object SystemUIHeadsetIconHook : HookContext() {
         } catch (e: Throwable) {
             Log.e(TAG, "safeStatusBarHook failed", e)
         }
+    }
+
+    // ── ★ 3.0.16 胶囊图标换图的状态 ─────────────────────────────
+    // CAPSULE_ICON_GUARD：换图时自己调 setImageDrawable 会再进拦截，靠它防递归。
+    // CAPSULE_SEEN / CAPSULE_TOTAL：日志按签名去重封顶（沿用球阵探针纪律）。
+    // CAPSULE_PENDING：已挂单帧复核的图标位（弱引用集合，防重复挂）。
+    private val CAPSULE_ICON_GUARD = object : ThreadLocal<Boolean>() {
+        override fun initialValue(): Boolean = false
+    }
+    private val CAPSULE_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val CAPSULE_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val CAPSULE_PENDING: MutableSet<android.view.View> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+    @Volatile private var capsuleCcResources: android.content.res.Resources? = null
+
+    private val CAPSULE_EARBUD_NAMES = arrayOf(
+        "device_icon_in_ear_earphone_shadow",
+        "device_icon_semi_in_ear_earphone_shadow"
+    )
+    private const val CAPSULE_HEADPHONE_NAME = "device_icon_default_earphone"
+    private const val CAPSULE_OUR_NAME = "WH-1000XM4"
+
+    private fun capsuleDiag(value: String) {
+        runCatching {
+            val app = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+                ?: return@runCatching
+            android.provider.Settings.Global.putString(
+                app.contentResolver, "magicxm4_diag_capsuleprobe", value.take(600)
+            )
+        }
+    }
+
+    private fun capsuleLog(sig: String, msg: String) {
+        if (CAPSULE_SEEN.add(sig) && CAPSULE_TOTAL.incrementAndGet() <= 24) {
+            Log.w(TAG, "▶ 胶囊图标 $msg")
+            capsuleDiag(msg)
+        }
+    }
+
+    private fun capsuleAncestorChain(view: android.view.View): String {
+        val sb = StringBuilder()
+        var node: android.view.View? = view
+        var depth = 0
+        while (node != null && depth < 16) {
+            if (depth > 0) sb.append('<')
+            sb.append(node.javaClass.simpleName)
+            node = node.parent as? android.view.View
+            depth++
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 身份判据：从图标位向上找到窗口根（≤20 层），在该子树内（≤240 节点）
+     * 找文本恰为 target 的 TextView。胶囊是独立小窗、树很小；找不到即非我方。
+     */
+    private fun capsuleTreeContainsText(view: android.view.View, target: String): Boolean {
+        var root: android.view.View = view
+        var depth = 0
+        while (depth < 20) {
+            val par = root.parent as? android.view.View ?: break
+            root = par
+            depth++
+        }
+        var count = 0
+        fun dfs(v: android.view.View): Boolean {
+            if (++count > 240) return false
+            if (v is android.widget.TextView && v.text?.toString()?.trim() == target) return true
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) if (dfs(v.getChildAt(i))) return true
+            }
+            return false
+        }
+        return runCatching { dfs(root) }.getOrDefault(false)
+    }
+
+    private fun capsuleResIdByName(
+        res: android.content.res.Resources, name: String, defPackage: String
+    ): Int = runCatching { res.getIdentifier(name, "drawable", defPackage) }.getOrDefault(0)
+
+    private fun capsuleControlCenterResources(
+        ctx: android.content.Context?
+    ): android.content.res.Resources? {
+        capsuleCcResources?.let { return it }
+        val c = ctx ?: return null
+        val r = runCatching {
+            c.createPackageContext("com.hihonor.controlcenter", 0).resources
+        }.getOrNull()
+        if (r != null) capsuleCcResources = r
+        return r
+    }
+
+    /**
+     * 入参 drawable 是耳塞两图之一：ConstantState 身份比对。参考图分别从
+     * 图标位自己的资源与控制中心包资源按名解析（胶囊图源包静态定不死，
+     * 两边都比）；任一命中即认。认不出（位图直传等）返回 false，走探针。
+     */
+    private fun isCapsuleEarbudDrawable(
+        view: android.widget.ImageView, d: android.graphics.drawable.Drawable
+    ): Boolean {
+        val cs = runCatching { d.constantState }.getOrNull() ?: return false
+        val resList = mutableListOf(view.resources)
+        capsuleControlCenterResources(view.context)?.let { resList.add(it) }
+        val pkgs = listOfNotNull(
+            runCatching { view.context?.packageName }.getOrNull(),
+            "com.hihonor.controlcenter"
+        )
+        for (res in resList) {
+            for (pkg in pkgs) {
+                for (name in CAPSULE_EARBUD_NAMES) {
+                    val id = capsuleResIdByName(res, name, pkg)
+                    if (id != 0) {
+                        val ref = runCatching { res.getDrawable(id, view.context?.theme) }.getOrNull()
+                        if (ref != null && ref.constantState === cs) return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /** 头戴图：优先图标位自己资源包的同名资源，没有再从控制中心包资源加载。 */
+    private fun loadCapsuleHeadphone(
+        view: android.widget.ImageView
+    ): android.graphics.drawable.Drawable? {
+        runCatching {
+            val pkg = view.context?.packageName ?: ""
+            val id = capsuleResIdByName(view.resources, CAPSULE_HEADPHONE_NAME, pkg)
+            if (id != 0) return view.resources.getDrawable(id, view.context?.theme)
+        }
+        val cc = capsuleControlCenterResources(view.context) ?: return null
+        val id = capsuleResIdByName(cc, CAPSULE_HEADPHONE_NAME, "com.hihonor.controlcenter")
+        if (id == 0) return null
+        return runCatching { cc.getDrawable(id, view.context?.theme) }.getOrNull()
+    }
+
+    private fun installCapsuleIconHook() {
+        var installed = 0
+        // a) ImageView.setImageResource(int)：入参 id 的 entry 名即图名。
+        runCatching {
+            val m = android.widget.ImageView::class.java
+                .getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val view = chain.thisObject as? android.widget.ImageView
+                val resId = (chain.args.getOrNull(0) as? Int) ?: 0
+                if (view != null && resId != 0 && !CAPSULE_ICON_GUARD.get() && isXm4Connected()) {
+                    val entry = runCatching {
+                        view.resources.getResourceEntryName(resId)
+                    }.getOrNull()
+                    if (entry != null && CAPSULE_EARBUD_NAMES.contains(entry)) {
+                        if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME)) {
+                            val head = loadCapsuleHeadphone(view)
+                            if (head != null) {
+                                val ret = chain.proceed()
+                                CAPSULE_ICON_GUARD.set(true)
+                                try { view.setImageDrawable(head) } finally {
+                                    CAPSULE_ICON_GUARD.set(false)
+                                }
+                                capsuleLog(
+                                    "res|swap|$entry",
+                                    "setImageResource arg=$entry swapped=headphone " +
+                                        "gate=now chain=${capsuleAncestorChain(view)}"
+                                )
+                                return@intercept ret
+                            }
+                        } else {
+                            capsuleDeferredRecheck(view, "setImageResource:$entry")
+                            capsuleLog(
+                                "res|miss|$entry",
+                                "setImageResource arg=$entry gate=miss " +
+                                    "chain=${capsuleAncestorChain(view)}"
+                            )
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "胶囊图标 setImageResource 装载失败: ${it.javaClass.simpleName}")
+        }
+        // b) ImageView.setImageDrawable(Drawable)：认图走 ConstantState 身份。
+        runCatching {
+            val m = android.widget.ImageView::class.java.getDeclaredMethod(
+                "setImageDrawable", android.graphics.drawable.Drawable::class.java
+            )
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val view = chain.thisObject as? android.widget.ImageView
+                val d = chain.args.getOrNull(0) as? android.graphics.drawable.Drawable
+                if (view != null && d != null && !CAPSULE_ICON_GUARD.get() && isXm4Connected()) {
+                    if (isCapsuleEarbudDrawable(view, d)) {
+                        if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME)) {
+                            val head = loadCapsuleHeadphone(view)
+                            if (head != null) {
+                                capsuleLog(
+                                    "drw|swap|${d.javaClass.simpleName}",
+                                    "setImageDrawable arg=${d.javaClass.simpleName} " +
+                                        "swapped=headphone gate=now " +
+                                        "chain=${capsuleAncestorChain(view)}"
+                                )
+                                val newArgs = chain.args.toTypedArray()
+                                newArgs[0] = head
+                                return@intercept chain.proceed(newArgs)
+                            }
+                        } else {
+                            capsuleDeferredRecheck(view, "setImageDrawable")
+                            capsuleLog(
+                                "drw|miss|${d.javaClass.simpleName}",
+                                "setImageDrawable arg=${d.javaClass.simpleName} " +
+                                    "gate=miss chain=${capsuleAncestorChain(view)}"
+                            )
+                        }
+                    } else if (d is android.graphics.drawable.BitmapDrawable) {
+                        // 位图直传且祖先链带 Capsule 字样才记（只记不换，供归因）。
+                        val anc = capsuleAncestorChain(view)
+                        if (anc.contains("Capsule", ignoreCase = true) ||
+                            anc.contains("Island", ignoreCase = true)
+                        ) {
+                            capsuleLog(
+                                "bmp|${anc.hashCode()}",
+                                "setImageDrawable bitmap inCapsuleChain " +
+                                    "nameFound=${capsuleTreeContainsText(view, CAPSULE_OUR_NAME)} " +
+                                    "chain=$anc"
+                            )
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "胶囊图标 setImageDrawable 装载失败: ${it.javaClass.simpleName}")
+        }
+        capsuleDiag("installed=$installed/2 (3.0.16 胶囊图标: 名牌门同步换 + 单帧复核 + 探针)")
+        Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/2)")
+    }
+
+    /**
+     * 名牌后绑时序的单帧复核：post 到下一帧时，树内同时有我方名牌与
+     * 「已连接」、且当前图仍是耳塞图才换。胶囊不是 morph 动画主体，
+     * 单帧内换图不可见；判据不齐一律不动。
+     */
+    private fun capsuleDeferredRecheck(view: android.widget.ImageView, via: String) {
+        if (!CAPSULE_PENDING.add(view)) return
+        val posted = runCatching {
+            view.post {
+                CAPSULE_PENDING.remove(view)
+                runCatching {
+                    if (!view.isAttachedToWindow) return@runCatching
+                    val cur = view.drawable ?: return@runCatching
+                    if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME) &&
+                        capsuleTreeContainsText(view, "已连接") &&
+                        isCapsuleEarbudDrawable(view, cur)
+                    ) {
+                        val head = loadCapsuleHeadphone(view) ?: return@runCatching
+                        CAPSULE_ICON_GUARD.set(true)
+                        try { view.setImageDrawable(head) } finally {
+                            CAPSULE_ICON_GUARD.set(false)
+                        }
+                        capsuleLog(
+                            "defer|swap|$via",
+                            "deferredSwap via=$via chain=${capsuleAncestorChain(view)}"
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(false)
+        if (!posted) CAPSULE_PENDING.remove(view)
     }
 }
