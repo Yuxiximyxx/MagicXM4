@@ -735,6 +735,31 @@ object ControlCenterNoiseHook : HookContext() {
                 diag("hook_ballicon", "fail: ${it.javaClass.simpleName}: ${it.message}")
             }
 
+            // ── 12b) ★ 3.0.14：全屏球阵页 XM4 球图【定位探针】（只观察、绝不改图）──
+            //   现象（真机两张截图先后证实）：下拉面板里的球 3.0.13 的门
+            //   工作正常；但从面板点进的全屏球阵页里，XM4 的球在 3.0.13
+            //   变回耳塞图（3.0.10 的全局 getDrawable 在世时它曾是头戴图，
+            //   且当时全阵列误伤——证明该页与面板共用同一套取图资源、
+            //   且本 hook 的代码在该页所在进程里运行）。
+            //   本仓静态材料能定的：球由 controlviewnew 的
+            //   DeviceBallLayoutManager.createDeviceBall 按 DeviceInfo
+            //   逐颗创建（BasicDeviceBallViewAdapter → BasicDeviceBallView），
+            //   全屏页与面板是同一套球系统；XM4 的球由本模块注入
+            //   DeviceInfo（MAC/WH-1000XM4/Third）产生，别家球是宿主原生
+            //   数据。静态材料定不了的：该页里耳塞图递进图标位的那一次
+            //   调用，receiver 的祖先链上球根的确切类名/层数、球根在该页
+            //   构图下还读不读得到 DeviceInfo。故本版先装探针把这一次调用
+            //   的实况钉死（祖先链类名序列 + 球根命中形态 + 名牌锚点），
+            //   下一版再按实况装带视图本人的严格门。探针只记不改：
+            //   不换任何图、不动任何返回值，控制面与 3.0.13 逐行一致；
+            //   全局 getDrawable hook 不复活。
+            runCatching {
+                installAamBallGridProbe()
+            }.onFailure {
+                Log.w(TAG, "球阵探针装载失败: ${it.javaClass.simpleName}: ${it.message}")
+                diag("gridprobe", "fail: ${it.javaClass.simpleName}: ${it.message}")
+            }
+
             // ── 11d) ★ FIX-005：「更多设置」点了没反应 —— 自己拉起蓝牙详情页 ──
             //   jumpToMoreSettings: DeviceBallManager.getDeviceInfoById(id) 为 null 时只打日志不 return，
             //   紧接着就调 deviceInfoById.getDeviceType() → NPE，点击被吞掉。
@@ -1788,6 +1813,13 @@ object ControlCenterNoiseHook : HookContext() {
     private val BALL_ICON_SEEN: MutableSet<String> =
         java.util.Collections.synchronizedSet(mutableSetOf())
     private val BALL_ICON_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    // ── ★ 3.0.14 全屏球阵定位探针的状态（只观察不改图，见
+    //   installAamBallGridProbe）：命中签名去重 + 总量封顶，避免球阵
+    //   每次重绘都刷日志/diag。 ──
+    private val GRID_PROBE_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val GRID_PROBE_ICON_CALLS = java.util.concurrent.atomic.AtomicInteger(0)
+    private val GRID_PROBE_NAME_CALLS = java.util.concurrent.atomic.AtomicInteger(0)
     // 宿主三张球图的资源 id（按 entry 名从宿主资源表查，不写死数值；
     //   资源 id 全进程通用，首次查到后缓存）。[0]=default（头戴目标图）
     //   [1]=in_ear [2]=semi_in_ear —— 后两者命中才需要改。
@@ -2069,6 +2101,217 @@ object ControlCenterNoiseHook : HookContext() {
             Log.w(TAG, "球图标选图: setImageDrawable 装载失败: ${it.javaClass.simpleName}: ${it.message}")
         }
         diag("hook_ballicon", "installed（3.0.13 仅 ImageView 两入口、验球正身）")
+    }
+
+    /**
+     * ★ 3.0.14 全屏球阵定位探针 —— 【只观察、绝不改图】。
+     *
+     * 为什么先探针、后修法（证据链）：
+     *  - 下拉面板的球：MagicPods v2.10.6 资源潜行实证 + 本模块 3.0.13
+     *    真机表现 —— BasicDeviceBallView.initIcon 经 ImageView 交付
+     *    入口在三张图里选，3.0.13 的「父链找球根 + DeviceInfo 验正身」
+     *    在面板里命中正常（用户截图：面板/展开卡侧无回归报告）。
+     *  - 全屏球阵页：3.0.10 全局 getDrawable 在世时 XM4 球是头戴图、
+     *    别家球全误伤 → 该页与面板共用同一批 controlcenter 图资源、
+     *    且本模块 hook 代码在该页进程里运行（本 hook 只随
+     *    ControlCenterNoiseHook 装进 controlcenter / systemui 两进程；
+     *    AAM 进程只装 HonorEarphoneHook，没有本文件的任何代码）。
+     *  - 3.0.13 撤掉全局层后该页 XM4 球变回耳塞图 → 该页里耳塞图递进
+     *    图标位的调用没被两入口的门逮住：球根类名不同 / 图标位不在
+     *    球根 12 层父链内 / 该页构图下球根读不到 DeviceInfo，三者必
+     *    居其一 —— 静态材料（本仓代码与注释）定不了是哪一个。
+     * 本探针把那一次调用的实况钉死，供下一版按实况装门：
+     *  a) ImageView.setImageResource / setImageDrawable：入参是耳塞
+     *     两图之一时，记录 receiver 的祖先链类名序列（≤16 层）、
+     *     findBallOf 命中形态（ball / 仅名牌祖先 / 无）、该球名牌
+     *     文案与是否验明 XM4 —— 只记不改，一律原样 proceed；
+     *  b) TextView.setText：文案命中 XM4 或别家设备名时作「球名锚点」
+     *     记录 —— 名牌 TextView 的祖先链就是该页球根的真实形状
+     *     （名牌必然长在球身上，不受图标位构图影响）。
+     * 命中按签名去重、总量封顶（图标 24 / 名牌 12），结果写进
+     * Settings.Global 的 magicxm4_diag_gridprobe（图标）与
+     * magicxm4_diag_gridprobe_name（名牌），并同步打模块日志。
+     * 全程 runCatching 包裹：探针自身出任何问题都不许影响宿主
+     * 设图/改名主流程。
+     */
+    private fun installAamBallGridProbe() {
+        var installed = 0
+        // a1) ImageView.setImageResource(int)：耳塞图递进图标位时记录。
+        runCatching {
+            val m = android.widget.ImageView::class.java
+                .getDeclaredMethod("setImageResource", Int::class.javaPrimitiveType)
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                if (!BALL_ICON_GUARD.get()) {
+                    val view = chain.thisObject as? android.widget.ImageView
+                    val resId = (chain.args.getOrNull(0) as? Int) ?: 0
+                    if (view != null && resId != 0) {
+                        val ids = runCatching { ballIconIds(view.resources) }.getOrNull()
+                        if (ids != null && resId != ids[0] &&
+                            (resId == ids[1] || resId == ids[2])
+                        ) {
+                            val fromName = runCatching {
+                                view.resources.getResourceEntryName(resId)
+                            }.getOrDefault("id$resId")
+                            gridProbeIcon(view, "setImageResource", fromName)
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "球阵探针 setImageResource 装载失败: ${it.javaClass.simpleName}")
+        }
+        // a2) ImageView.setImageDrawable(Drawable)：同上，认图走
+        //   ConstantState 身份（与 3.0.13 b 入口同一认法）。
+        runCatching {
+            val m = android.widget.ImageView::class.java.getDeclaredMethod(
+                "setImageDrawable",
+                android.graphics.drawable.Drawable::class.java
+            )
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                if (!BALL_ICON_GUARD.get()) {
+                    val view = chain.thisObject as? android.widget.ImageView
+                    val drawable = chain.args.getOrNull(0)
+                        as? android.graphics.drawable.Drawable
+                    if (view != null && drawable != null) {
+                        val ids = runCatching { ballIconIds(view.resources) }.getOrNull()
+                        val earIdx = if (ids != null) {
+                            runCatching { earbudIndexOf(view, drawable, ids) }
+                                .getOrDefault(-1)
+                        } else {
+                            -1
+                        }
+                        if (ids != null && earIdx > 0) {
+                            val fromName = runCatching {
+                                view.resources.getResourceEntryName(ids[earIdx])
+                            }.getOrDefault("id${ids[earIdx]}")
+                            gridProbeIcon(view, "setImageDrawable", fromName)
+                        }
+                    }
+                }
+                chain.proceed()
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "球阵探针 setImageDrawable 装载失败: ${it.javaClass.simpleName}")
+        }
+        // b) TextView.setText(CharSequence)：球名锚点。文案命中我方或
+        //   别家设备名才记（廉价 contains 先行，命不中不取任何状态）。
+        runCatching {
+            val m = android.widget.TextView::class.java.getDeclaredMethod(
+                "setText",
+                CharSequence::class.java
+            )
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val view = chain.thisObject as? android.widget.TextView
+                val text = chain.args.getOrNull(0) as? CharSequence
+                if (view != null && text != null) {
+                    val t = text.toString().trim()
+                    if (t == OUR_NAME || OTHER_DEVICE_NAMES.any { t.contains(it) }) {
+                        gridProbeName(view)
+                    }
+                }
+                chain.proceed()
+            }
+            installed++
+        }.onFailure {
+            Log.w(TAG, "球阵探针 setText 装载失败: ${it.javaClass.simpleName}")
+        }
+        diag("gridprobe", "installed=$installed/3（3.0.14 定位探针，只记不改）")
+        Log.i(TAG, "installed: 全屏球阵定位探针 [3.0.14 只观察]")
+    }
+
+    /** 球阵探针的图标记录：receiver 祖先链 + 球根命中形态 + 名牌文案。 */
+    private fun gridProbeIcon(
+        view: android.widget.ImageView,
+        kind: String,
+        argDesc: String
+    ) {
+        runCatching {
+            val ball = findBallOf(view)
+            val chainSb = StringBuilder()
+            var node: android.view.View? = view
+            var depth = 0
+            var nameTxt: String? = null
+            while (node != null && depth < 16) {
+                if (depth > 0) chainSb.append('<')
+                chainSb.append(node.javaClass.simpleName)
+                if (nameTxt == null && node is android.view.ViewGroup) {
+                    nameTxt = runCatching {
+                        (findByIdName(node, "device_ball_name")
+                            as? android.widget.TextView)?.text?.toString()
+                    }.getOrNull()
+                }
+                node = node.parent as? android.view.View
+                depth++
+            }
+            val root = when {
+                ball != null -> "ball"
+                nameTxt != null -> "namedAncestor"
+                else -> "none"
+            }
+            val our = when {
+                ball != null -> isOurBallView(ball)
+                nameTxt != null -> nameTxt.trim() == OUR_NAME
+                else -> false
+            }
+            val sig = "icon|$kind|$argDesc|$root|$our|${chainSb.take(120)}"
+            if (GRID_PROBE_SEEN.add(sig) &&
+                GRID_PROBE_ICON_CALLS.incrementAndGet() <= 24
+            ) {
+                Log.w(
+                    TAG,
+                    "▶ 球阵探针 icon $kind arg=$argDesc root=$root our=$our " +
+                        "name=${nameTxt ?: "-"} chain=$chainSb"
+                )
+                diag(
+                    "gridprobe",
+                    "icon $kind arg=$argDesc root=$root our=$our " +
+                        "name=${nameTxt ?: "-"} chain=${chainSb.take(300)}"
+                )
+            }
+        }
+    }
+
+    /** 球阵探针的名牌锚点记录：名牌 TextView 的祖先链 = 球根真实形状。 */
+    private fun gridProbeName(view: android.widget.TextView) {
+        runCatching {
+            val txt = view.text?.toString()?.trim() ?: return
+            val idName = if (view.id != android.view.View.NO_ID) {
+                runCatching { view.resources.getResourceEntryName(view.id) }.getOrNull()
+            } else {
+                null
+            }
+            val ball = findBallOf(view)
+            val chainSb = StringBuilder()
+            var node: android.view.View? = view
+            var depth = 0
+            while (node != null && depth < 16) {
+                if (depth > 0) chainSb.append('<')
+                chainSb.append(node.javaClass.simpleName)
+                node = node.parent as? android.view.View
+                depth++
+            }
+            val sig = "name|$txt|$idName|${ball != null}|${chainSb.take(120)}"
+            if (GRID_PROBE_SEEN.add(sig) &&
+                GRID_PROBE_NAME_CALLS.incrementAndGet() <= 12
+            ) {
+                Log.w(
+                    TAG,
+                    "▶ 球阵探针 name text=$txt idName=${idName ?: "-"} " +
+                        "inBall=${ball != null} chain=$chainSb"
+                )
+                diag(
+                    "gridprobe_name",
+                    "text=$txt idName=${idName ?: "-"} inBall=${ball != null} " +
+                        "chain=${chainSb.take(300)}"
+                )
+            }
+        }
     }
 
     /**
