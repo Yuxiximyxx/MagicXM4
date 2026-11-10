@@ -44,8 +44,53 @@ object SystemUIHeadsetIconHook : HookContext() {
      * （按设备名/别名认定 WH-1000XM4 本人），与状态栏图标显隐共用同一份状态，
      * 不新增跨进程键。没有这道门时，XM4 没连接也会把音频通知的占位标题盖成
      * WH-1000XM4，抢掉同时在跑的 MagicPods（Free4）那条通知（2026-11-10 A/B 实锤）。
+     * ★ 3.0.24 更正：这道连接门在 SystemUI 进程内不可靠 —— SystemUI 被
+     * 强停重启时 XM4 已连着、A2DP CONNECTED 广播不会重发，connectedAddresses
+     * 就一直空（3.0.22 winProbe 五轮扫描全被它误杀报 notConnected，同轮展开卡
+     * 靠文本自证正常命中；MagicPods 同一道门已实锤害 Free4 通知标题停在占位
+     * 文案）。但 XM4 写死设备名、无条件改写又会抢 Free4 的通知（3.0.8 原案），
+     * 故通知文案改写两处门改为「连接门 || 名牌自证」：通知自身树内已有
+     * WH-1000XM4 文案（正文本来就是设备名）才许改占位标题，setText 路当场
+     * 没验到名牌再补延迟复核。isXm4Connected 本体与状态栏图标链等其他
+     * 使用点不动。
      */
     private fun isXm4Connected(): Boolean = connectedAddresses.isNotEmpty()
+
+    // ★ 3.0.24 占位标题延迟复核的状态：已挂复核的 TextView（弱引用防重复挂）。
+    private val NOTIF_DEFER_PENDING: MutableSet<android.view.View> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+
+    /**
+     * ★ 3.0.24 占位标题延迟复核（仿 capsuleDeferredRecheck 的多帧模式）：
+     * setText 当场没验到名牌（名牌可能后绑）时，在当前帧 + 150ms +
+     * 500ms 各复核一次 —— 该 TextView 文案仍是占位文案、且其所在树
+     * 内已出现 WH-1000XM4 名牌，才直接改成设备名并记 gate=deferred。
+     * 三帧都没验到就放弃，绝不无条件改写（防抢 Free4 通知，3.0.8 原案）。
+     */
+    private fun placeholderDeferredRecheck(tv: android.widget.TextView) {
+        if (!NOTIF_DEFER_PENDING.add(tv)) return
+        val delays = longArrayOf(0L, 150L, 500L)
+        var postedAny = false
+        for (i in delays.indices) {
+            val last = i == delays.lastIndex
+            val r = Runnable {
+                runCatching {
+                    if ((tv.text?.toString() ?: "") == "当前音频输入输出设备" &&
+                        capsuleTreeContainsText(tv, CAPSULE_OUR_NAME)
+                    ) {
+                        Log.w(TAG, "★★★★ TextView.setText 延迟改写 gate=deferred frame=$i: '当前音频输入输出设备' → 'WH-1000XM4'")
+                        tv.text = "WH-1000XM4"
+                    }
+                }
+                if (last) NOTIF_DEFER_PENDING.remove(tv)
+            }
+            val ok = runCatching {
+                if (delays[i] <= 0L) tv.post(r) else tv.postDelayed(r, delays[i])
+            }.getOrDefault(false)
+            if (ok) postedAny = true
+        }
+        if (!postedAny) NOTIF_DEFER_PENDING.remove(tv)
+    }
     private const val SLOT = "wireless_headset"
     private const val MAX_RECONNECT_ATTEMPTS = 3
 
@@ -79,23 +124,43 @@ object SystemUIHeadsetIconHook : HookContext() {
                 m.isAccessible = true
                 module.hook(m).intercept { chain ->
                     val ret = chain.proceed()
-                    if (ret is android.view.View && isXm4Connected()) {
-                        var changed = 0
-                        fun walk(v: android.view.View) {
+                    if (ret is android.view.View) {
+                        // ★ 3.0.24 名牌自证门（根因见 isXm4Connected 头注）：
+                        // 先收集树内全部文案自证身份 —— 连接成立走
+                        // gate=connected；连接门空但树内已有 WH-1000XM4
+                        // （该通知正文本来就是设备名）走 gate=namePlate；
+                        // 树里是别家设备名（Free4 等）时一律不动。
+                        val texts = mutableListOf<String>()
+                        fun collect(v: android.view.View) {
                             if (v is android.widget.TextView) {
-                                // ★ 3.0.16 更正（用户点名）：名字行不再改写成
-                                // 电量行 —— 这条通知的目标形态就是显示设备名
-                                // 本身、不带任何电量信息。只保留占位标题 →
-                                // 设备名一处改写，结果标题/内容都是名字。
-                                if ((v.text?.toString() ?: "") == "当前音频输入输出设备") {
-                                    v.text = "WH-1000XM4"; changed++
-                                }
-                            } else if (v is android.view.ViewGroup) {
-                                for (i in 0 until v.childCount) walk(v.getChildAt(i))
+                                texts.add(v.text?.toString() ?: "")
+                            }
+                            if (v is android.view.ViewGroup) {
+                                for (i in 0 until v.childCount) collect(v.getChildAt(i))
                             }
                         }
-                        walk(ret)
-                        if (changed > 0) Log.w(TAG, "★★★ SystemUI 通知改写 $changed 处（$mn）")
+                        collect(ret)
+                        val connected = isXm4Connected()
+                        val namePlate = texts.any { it == "WH-1000XM4" }
+                        if (connected || namePlate) {
+                            val gate = if (connected) "connected" else "namePlate"
+                            var changed = 0
+                            fun walk(v: android.view.View) {
+                                if (v is android.widget.TextView) {
+                                    // ★ 3.0.16 更正（用户点名）：名字行不再改写成
+                                    // 电量行 —— 这条通知的目标形态就是显示设备名
+                                    // 本身、不带任何电量信息。只保留占位标题 →
+                                    // 设备名一处改写，结果标题/内容都是名字。
+                                    if ((v.text?.toString() ?: "") == "当前音频输入输出设备") {
+                                        v.text = "WH-1000XM4"; changed++
+                                    }
+                                } else if (v is android.view.ViewGroup) {
+                                    for (i in 0 until v.childCount) walk(v.getChildAt(i))
+                                }
+                            }
+                            walk(ret)
+                            if (changed > 0) Log.w(TAG, "★★★ SystemUI 通知改写 $changed 处（$mn） gate=$gate")
+                        }
                     }
                     ret
                 }
@@ -120,11 +185,25 @@ object SystemUIHeadsetIconHook : HookContext() {
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()
                 // ★ 3.0.16 更正：只改占位标题 → 设备名；设备名本身原样
                 // 放行（此前会被改写成电量行，用户点名不要任何电量信息）。
-                if (isXm4Connected() && t == "当前音频输入输出设备") {
-                    Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → 'WH-1000XM4'")
-                    val newArgs = chain.args.toTypedArray()
-                    newArgs[0] = "WH-1000XM4"
-                    return@intercept chain.proceed(newArgs)
+                // ★ 3.0.24：门改名牌自证（根因见 isXm4Connected 头注）——
+                // 连接成立走 gate=connected；否则查本 TextView 所在树
+                // 是否已有 WH-1000XM4 名牌，走 gate=namePlate；当场没
+                // 验到再补一轮延迟复核（gate=deferred，名牌可能后绑），
+                // 三路都没验到绝不改写（防抢 Free4 通知，3.0.8 原案）。
+                if (t == "当前音频输入输出设备") {
+                    val connected = isXm4Connected()
+                    val view = chain.thisObject as? android.view.View
+                    val namePlate = !connected && view != null &&
+                        capsuleTreeContainsText(view, CAPSULE_OUR_NAME)
+                    if (connected || namePlate) {
+                        val gate = if (connected) "connected" else "namePlate"
+                        Log.w(TAG, "★★★★ TextView.setText 改写 gate=$gate: '$t' → 'WH-1000XM4'")
+                        val newArgs = chain.args.toTypedArray()
+                        newArgs[0] = "WH-1000XM4"
+                        return@intercept chain.proceed(newArgs)
+                    }
+                    val tv = chain.thisObject as? android.widget.TextView
+                    if (tv != null) placeholderDeferredRecheck(tv)
                 }
                 chain.proceed()
             }

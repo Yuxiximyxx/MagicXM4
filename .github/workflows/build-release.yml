@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.23-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.24-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.23-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.24-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,42 +64,42 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.23
-          name: MagicXM4 v3.0.23 — 窗口扫描探针（连接门换名牌门，只记不换）
+          tag_name: v3.0.24
+          name: MagicXM4 v3.0.24 — 通知占位标题改写换名牌自证门
           body: |
-            ## MagicXM4 3.0.23（叠在 3.0.22 之上）
+            ## MagicXM4 3.0.24（叠在 3.0.23 之上）
 
-            仍是纯取证版：只记不换。本版**只改窗口扫描探针
-            （winProbe）的连接门**，扫描本体（全窗口 DFS
-            与记录格式）未动；animSwap / treeSwap /
-            treeprobe / miniprobe / 文案 / 名牌门全部原样，
-            isXm4Connected 本身与它的其他使用点（文案改
-            写、状态栏图标链）一律不动。
+            只修一件事：音频通知占位标题（「当前音频输入输出
+            设备」）改写成 WH-1000XM4 的门。原门只有
+            isXm4Connected()（connectedAddresses 非空），
+            而该集合在 SystemUI 进程内不可靠 —— SystemUI
+            被强停重启时 XM4 已连着、A2DP CONNECTED 广播
+            不会重发，集合就一直空（3.0.22 winProbe 五轮扫
+            描全被它误杀报 notConnected，同轮展开卡靠文本
+            自证正常命中；MagicPods 同一道门已实锤害 Free4
+            通知标题停在占位文案，v2.10.15 已去门修复）。
 
-            3.0.22 为何仍零产出（真机日志已判）：setText
-            主武装工作正常（5 轮 armed via=setText），但
-            每轮扫描都被入口的 isXm4Connected() 硬门
-            skip（reason=notConnected，conn=false）；同轮
-            展开卡 treeprobe 命中 [已连接, WH-1000XM4]、
-            animSwap 成功换图 —— XM4 明明连着。根源：
-            该门读的 connectedAddresses 在 SystemUI 本
-            进程恒空（维护回调不在本进程生效），扫描是
-            被自家的连接门误杀的。
+            但 XM4 不能照抄无条件改写：它写死 WH-1000XM4，
+            无条件改会在 XM4 未连接、Free4 在用时把 Free4
+            的通知标题抢成 WH-1000XM4（3.0.8 加门的原案）。
+            故本版换「名牌自证门」，只动通知文案改写两处：
 
-            本版改法：
-            - winProbeScan 入口硬门拆除，换「名牌门」：
-              先枚举全部根视图做轻量文本预检，任一棵树
-              含 WH-1000XM4（或 已连接）即放行全量扫描
-              并记 gate=nameFound；一棵都没有才 skip，
-              skip 行记 reason=noNamePlate 并附各树 root
-              类名概览。
-            - 开机恢复武装路径的连接预检一并拆除，武装
-              侧不再预杀（扫描内部已有名牌门）。
+            - RemoteViews 路：先收集树内全部文案，门改为
+              连接成立（gate=connected）或树内任一文案 ==
+              WH-1000XM4（gate=namePlate，该通知正文本来
+              就是设备名）；树里是别家设备名时不动。
+            - TextView.setText 路：占位文案命中时门改为
+              连接成立或 capsuleTreeContainsText 查到本树
+              有 WH-1000XM4 名牌；当场没验到补延迟复核
+              （0/150/500ms，仍是占位且树内已出现名牌才
+              改，记 gate=deferred）。
 
-            签名与 3.0.22 同证书（SHA-256: 62F45C54…8C55），
-            可直接覆盖装。装后须强停 SystemUI 宿主进程才
-            加载新代码；重连 XM4、让收起态小胶囊在顶部
-            停留几秒，再导 LSPosed 日志看「▶ 窗口扫描」
-            行（重点找 EARBUD + TOP 标记）即可钉死小胶
-            囊图标位，下一版按实况装门。
+            isXm4Connected 本体、状态栏图标链、winProbe
+            （3.0.23 名牌门扫描，收起态小胶囊取证还要靠
+            它）、capsule/treeSwap/animSwap/miniprobe 探
+            针、其他 hook 一律未动。
+
+            签名与 3.0.23 同证书（SHA-256: 62F45C54…8C55），
+            可直接覆盖装。装后须强停「系统界面」进程才加
+            载新代码，再重连 XM4 看音频通知标题。
           files: dist/*.apk
