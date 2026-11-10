@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.22-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.23-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.22-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.23-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,42 +64,39 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.22
-          name: MagicXM4 v3.0.22 — 窗口扫描探针（武装改双路，只记不换）
+          tag_name: v3.0.23
+          name: MagicXM4 v3.0.23 — 窗口扫描探针（连接门换名牌门，只记不换）
           body: |
-            ## MagicXM4 3.0.22（叠在 3.0.21 之上）
+            ## MagicXM4 3.0.23（叠在 3.0.22 之上）
 
             仍是纯取证版：只记不换。本版**只改窗口扫描探针
-            （winProbe）的武装方式**，扫描本体（全窗口 DFS
-            与记录格式）一个字未动；animSwap / treeSwap /
-            文案 / 名牌门全部原样。
+            （winProbe）的连接门**，扫描本体（全窗口 DFS
+            与记录格式）未动；animSwap / treeSwap /
+            treeprobe / miniprobe / 文案 / 名牌门全部原样，
+            isXm4Connected 本身与它的其他使用点（文案改
+            写、状态栏图标链）一律不动。
 
-            3.0.21 为何零产出（真机日志已判）：新码在跑、
-            展开卡 animSwap 本轮正常命中，但 winProbe 零
-            记录 —— 这轮连接全程抖动，A2DP 广播序列只有
-            CONNECTING → DISCONNECTED → CONNECTING，
-            日志窗口内从未出现 CONNECTED；而 3.0.21 的武
-            装只挂在 CONNECTED 分支与开机恢复，两个武装
-            点都没赶上（开机恢复武装时连接门不成立也会
-            skip）。触发源选错，不是扫描坏了。
+            3.0.22 为何仍零产出（真机日志已判）：setText
+            主武装工作正常（5 轮 armed via=setText），但
+            每轮扫描都被入口的 isXm4Connected() 硬门
+            skip（reason=notConnected，conn=false）；同轮
+            展开卡 treeprobe 命中 [已连接, WH-1000XM4]、
+            animSwap 成功换图 —— XM4 明明连着。根源：
+            该门读的 connectedAddresses 在 SystemUI 本
+            进程恒空（维护回调不在本进程生效），扫描是
+            被自家的连接门误杀的。
 
-            本版武装改双路：
-            - 主武装：挂到常驻的 TextView.setText 观察拦
-              截上 —— SystemUI 里任意一次 setText 发生时，
-              若距上次武装已超过 6 秒就武装一轮，扫描在
-              约 300ms 后执行一次（扫描内部仍以 XM4 已
-              连接为门，不成立记一行 skip 原因）。只要界
-              面在动、XM4 连着，扫描必然周期性跑到，小
-              胶囊在顶部停留期间必被扫中。
-            - 副武装：A2DP 的 CONNECTING 分支也调
-              winProbeSchedule（CONNECTED 分支与开机恢
-              复保持原样），连接抖动期也能提前布防。
-            - 每轮武装 / skip / 扫描都在 LSPosed 日志留
-              可辨识标记（armed via=setText|a2dp），不再
-              出现「零记录不知为何」的盲区。去重与总量
-              上限沿用既有 WIN_SEEN 机制。
+            本版改法：
+            - winProbeScan 入口硬门拆除，换「名牌门」：
+              先枚举全部根视图做轻量文本预检，任一棵树
+              含 WH-1000XM4（或 已连接）即放行全量扫描
+              并记 gate=nameFound；一棵都没有才 skip，
+              skip 行记 reason=noNamePlate 并附各树 root
+              类名概览。
+            - 开机恢复武装路径的连接预检一并拆除，武装
+              侧不再预杀（扫描内部已有名牌门）。
 
-            签名与 3.0.21 同证书（SHA-256: 62F45C54…8C55），
+            签名与 3.0.22 同证书（SHA-256: 62F45C54…8C55），
             可直接覆盖装。装后须强停 SystemUI 宿主进程才
             加载新代码；重连 XM4、让收起态小胶囊在顶部
             停留几秒，再导 LSPosed 日志看「▶ 窗口扫描」

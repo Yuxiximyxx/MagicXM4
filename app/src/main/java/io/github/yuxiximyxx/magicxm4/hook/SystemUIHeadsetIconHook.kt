@@ -319,7 +319,9 @@ object SystemUIHeadsetIconHook : HookContext() {
                             connectedAddresses.clear()
                             connectedAddresses.addAll(freshConnected)
                             // ★ 3.0.21：开机/进程重启时已连着 XM4 也武装一次窗口扫描。
-                            if (freshConnected.isNotEmpty()) winProbeSchedule(context, null)
+                            // ★ 3.0.23：武装侧不再拿连接结果预杀 —— 直接武装，
+                            // 扫描内部有名牌门把关（无名牌记 reason=noNamePlate）。
+                            winProbeSchedule(context, null)
                             mainHandler.post { safeUpdateIcon(context) }
                         } catch (e: Throwable) {
                             Log.e(TAG, "onServiceConnected failed", e)
@@ -700,6 +702,13 @@ object SystemUIHeadsetIconHook : HookContext() {
     // 观察拦截（任意 setText＋6 秒节流，武装后 300ms 扫一次）；
     // 副武装放宽到 A2DP 的 CONNECTING 分支也调 winProbeSchedule。
     // 扫描本体（winProbeScan 的 DFS 与记录格式）未动。
+    // ★ 3.0.23 追记：3.0.22 主武装五轮全数武装成功，但每轮扫描
+    // 都被入口的 isXm4Connected() 硬门 skip（reason=notConnected）
+    // —— 该门读的 connectedAddresses 在 SystemUI 本进程恒空，
+    // 而同轮展开卡靠文本自证（名牌）正常命中。本版把扫描入口
+    // 的硬门换成名牌门（winTreeHasNamePlate），开机恢复武装侧
+    // 的连接预检一并拆除；isXm4Connected 本身与其他使用点
+    // （文案改写、状态栏图标链）一律不动。
     private val WIN_SEEN: MutableSet<String> =
         java.util.Collections.synchronizedSet(mutableSetOf())
     private val WIN_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
@@ -737,8 +746,9 @@ object SystemUIHeadsetIconHook : HookContext() {
     /**
      * ★ 3.0.22 主武装：挂在 setText 观察拦截上，任意一次 setText
      * 都顺带问一句 —— 距上次武装超过 6 秒才真正武装一轮，扫描在
-     * 300ms 后跑一次（扫描内部仍以 isXm4Connected 为门，不成立
-     * 记一行 skip 原因）。零依赖连接状态：只要 SystemUI 界面在
+     * 300ms 后跑一次（扫描内部以名牌门把关 —— 3.0.23 起，任一
+     * 棵树含设备名/「已连接」文本才放行，否则记一行 skip 原因）。
+     * 零依赖连接状态：只要 SystemUI 界面在
      * 动、XM4 连着，扫描必然周期性跑到，小胶囊在顶部停留期间
      * 必被扫中。节流命中时不打日志，防 setText 高频刷屏。
      */
@@ -781,17 +791,64 @@ object SystemUIHeadsetIconHook : HookContext() {
         }.getOrDefault(emptyList())
     }
 
+    /**
+     * ★ 3.0.23 名牌门预检：一棵树内任一 TextView 文案含设备名
+     * 或「已连接」即算有名牌（与 animSwap/treeSwap 的文本自证
+     * 同一思路）。轻量 DFS，只读文案、节点上限与全量扫描一致。
+     */
+    private fun winTreeHasNamePlate(root: android.view.View): Boolean {
+        var nodes = 0
+        var found = false
+        fun dfs(v: android.view.View) {
+            if (found || ++nodes > 1200) return
+            if (v is android.widget.TextView) {
+                val t = v.text?.toString().orEmpty()
+                if (t.contains(CAPSULE_OUR_NAME) || t.contains("已连接")) {
+                    found = true
+                    return
+                }
+            }
+            if (v is android.view.ViewGroup) {
+                for (i in 0 until v.childCount) {
+                    dfs(v.getChildAt(i))
+                    if (found) return
+                }
+            }
+        }
+        runCatching { dfs(root) }
+        return found
+    }
+
     private fun winProbeScan(scanId: Int, frame: Int) {
         try {
-            if (!isXm4Connected()) {
-                Log.w(TAG, "▶ 窗口扫描 skip scan=$scanId frame=${frame}ms reason=notConnected")
+            val roots = winRootViews()
+            // ★ 3.0.23：拆除 isXm4Connected() 硬门 —— 它读的
+            // connectedAddresses 在本进程恒空（维护回调不在本进程
+            // 生效），3.0.22 五轮扫描全被 reason=notConnected 误杀，
+            // 同轮展开卡却靠文本自证正常命中。改名牌门：任一棵树
+            // 含设备名/「已连接」文本即放行（gate=nameFound）；
+            // 一棵都没有才 skip，skip 行附各树 root 类名概览。
+            var nameFound = false
+            val rootClasses = ArrayList<String>(roots.size)
+            for (root in roots) {
+                rootClasses.add(root.javaClass.simpleName)
+                if (!nameFound && winTreeHasNamePlate(root)) nameFound = true
+            }
+            if (!nameFound) {
+                Log.w(
+                    TAG, "▶ 窗口扫描 skip scan=$scanId frame=${frame}ms " +
+                        "reason=noNamePlate roots=$rootClasses"
+                )
+                winDiag(
+                    "magicxm4_diag_winprobe",
+                    "skip scan=$scanId frame=${frame}ms reason=noNamePlate roots=$rootClasses"
+                )
                 return
             }
-            val roots = winRootViews()
             val lines = mutableListOf<String>()
             var topImgs = 0
             var earbudImgs = 0
-            lines.add("scan=$scanId frame=${frame}ms roots=${roots.size}")
+            lines.add("scan=$scanId frame=${frame}ms roots=${roots.size} gate=nameFound")
             roots.forEachIndexed { ri, root ->
                 val texts = mutableListOf<String>()
                 val imgLines = mutableListOf<String>()
