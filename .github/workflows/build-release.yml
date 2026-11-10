@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.8-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.9-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.8-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.9-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,43 +64,44 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.8
-          name: MagicXM4 v3.0.8 — 通知串名门控；球/卡图标改走宿主原生头戴图
+          tag_name: v3.0.9
+          name: MagicXM4 v3.0.9 — 修断开态展开卡片卡头图标被误换成写实大图
           body: |
-            ## MagicXM4 3.0.8（全修版）
+            ## MagicXM4 3.0.9（回归修复，叠在 3.0.8 之上）
 
-            本版修两件：
+            只修一件 3.0.8 的回归，其余逻辑与 3.0.8 完全一致：
 
-            ### 一、通知文案串名（连接门控）
-            以前 SystemUI 文案改写不看当前连接设备：XM4 没连接时
-            也会把音频通知的占位标题盖成 WH-1000XM4，抢掉同时在跑的
-            MagicPods（Free4）的通知。本版给全部改写（RemoteViews
-            树遍历 + TextView.setText 两条路径、占位→机型名与
-            机型名→电量行两种改写）加门控：仅当 WH-1000XM4 是当前
-            已连接的 A2DP 设备时才改写。门控信号用 SystemUI 进程内
-            已有的 connectedAddresses（A2DP 广播 + 开机回补喂入、
-            按设备名认定 XM4 本人），不新增跨进程键。
+            真机录屏实证：点球展开卡片时，卡头图标会先变大、再缩回
+            正常（动画中途跳变）；XM4 未连接时展开的卡片里还会留下
+            一张白色写实头戴大图（与卡面风格不符）。
 
-            ### 二、图标改走宿主原生头戴图（弃自绘）
-            DSH 自绘的 ic_headphone 矢量图大小/位置/动画都与宿主
-            原生对不上。实证（同机构建）：展开卡片卡头原生就是宿主
-            的 device_icon_default_earphone（504×504 位图，画的正是
-            头戴式）；设备球 initIcon 对第三方设备挑中的是耳塞家族图。
-            本版：
-            - 拆除 setImageDrawable/setImageResource 自绘替换 hook；
-            - fixBallIcon 不再对展开卡片做任何覆盖（恢复宿主原生）；
-            - 球只把 XM4 那颗球的图标换成宿主自带的
-              device_icon_default_earphone（ConstantState 判定、
-              不碰 bounds/scale），尺寸/位置/动画与原生头戴设备一致；
-            - 删除模块自绘资源 ic_headphone.xml 与全部缩放逻辑
-              （含 magicxm4_icon_scale 调节键）。
+            根因：展开走 morph 动画，而 createDeviceCard 的 0ms 与
+            后续 postDelayed 触发点正落在动画窗口内；3.0.8 的
+            fixBallIcon 从 rootView 全树遍历所有 icon_image_view，
+            其归属判定 belongsToOurBall 同时认球名
+            （device_ball_name）和卡头名（device_name）——卡头那张图
+            的 ImageView 与卡头 device_name 在同一子树，于是被误判
+            成「球的图标」，在动画中途被换成
+            device_icon_default_earphone 的原始 504 位图且不设
+            bounds/scaleType：图标先骤然变大，随后宿主重新测量、
+            动画收束又缩回 —— 就是录屏里的「先变大再变小」；
+            断开态卡片布局下还会静态撑成写实大图，把 3.0.8「卡头
+            完全恢复宿主原生、零干预」的方针架空了。（连接态终态
+            观感正常只是该位图被在线布局的容器约束住了。）
 
-            ### ⚠️ 签名变更
-            本版起改走 GitHub Actions 构建 + 新签名证书
-            （SHA-256: 62F45C54…8C55），与 3.0.7 及以前 DSH 本地
-            签名的版本证书不同。有核心破解可直接覆盖装；否则需先
-            卸载旧版再装（设置会清零）。
+            修法（两层）：
+            - belongsToOurBall 锚点只认 device_ball_name；往上找时
+              若先遇到 device_name（卡片子树特征）直接判否。
+            - 动画保险：作用域里已出现我方展开卡
+              （device_name == WH-1000XM4）时，本轮 fixBallIcon
+              整体跳过 —— 动画窗口内一张图都不换。球的图标在点开
+              之前早已换好，不依赖动画中途的调用。
+            卡头从此真正零干预，球的换图逻辑不变。
 
-            待真机验证：连上 XM4 看球与展开卡片的图标；XM4 未连接
-            时连 Free4，音频通知标题应为 OPPO Enco Free4。
+            签名与 3.0.8 同证书（SHA-256: 62F45C54…8C55），可直接
+            覆盖装。
+
+            待真机验证：点球展开卡片，图标全程尺寸稳定、不再先
+            变大再缩回；XM4 未连接时展开服务卡，卡头应为宿主原生
+            的小图样式，不再是写实大图。
           files: dist/*.apk

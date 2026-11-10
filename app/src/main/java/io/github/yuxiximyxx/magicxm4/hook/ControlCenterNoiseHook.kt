@@ -1630,6 +1630,9 @@ object ControlCenterNoiseHook : HookContext() {
      *   - 展开卡片卡头（device_icon）：原生就是 device_icon_default_earphone
      *     （504×504 位图，画的正是头戴式）→ 本模块什么都不用做，
      *     撤掉原先对 device_icon 的覆盖即为原生效果。
+     *     （★ 3.0.9 更正：3.0.8 时卡头实际仍被本函数经 belongsToOurBall 的
+     *     宽判定误换，断开态撑成写实大图；判定收窄后才真正零干预，
+     *     根因详见 belongsToOurBall。）
      *   - 设备球（BasicDeviceBallView.initIcon）：对 Third 类设备在
      *     default / in_ear / semi_in_ear 三张里挑，挑中的是耳塞家族图 →
      *     XM4 是头戴，这里只把属于我们那颗球的 icon_image_view 换成宿主
@@ -1644,6 +1647,22 @@ object ControlCenterNoiseHook : HookContext() {
      * 直接改视图树最稳（沿用原触发时机：挂载/在线态刷新/卡片清理时调用）。
      */
     private fun fixBallIcon(root: android.view.View) {
+        // ★ 3.0.9 动画保险：作用域里已出现我方展开卡（device_name == OUR_NAME）
+        //   时，本轮整体跳过，一张图都不许换。
+        //   因果：点球展开卡片走的是 morph 动画，createDeviceCard 的 0ms 与后续
+        //   postDelayed 触发点正落在动画窗口内 —— 此刻把卡头图误换成
+        //   device_icon_default_earphone 的 504 原始位图，图标先骤然变大，
+        //   随后宿主重新测量、动画收束又缩回正常，就是真机录屏里的
+        //   「展开时图标先变大、再变小」的跳变。收窄判定（belongsToOurBall
+        //   只认球）堵住了误换本身，这里再兜一层：我方卡片在场（含展开中）
+        //   时动画驱动的视图树一律不碰。球的图标在点开之前早已由更早的
+        //   触发点换好，不依赖动画窗口内的调用；createDeviceCard /
+        //   cleanupCard 对 rootView 的调用同样受这条约束。
+        val cardName = findByIdName(root, "device_name") as? android.widget.TextView
+        if (cardName != null && cardName.text?.toString()?.trim() == OUR_NAME) {
+            diag("icon", "我方卡片在场（展开中/已展开），本轮跳过换图")
+            return
+        }
         val ballId = root.resources.getIdentifier("icon_image_view", "id", "com.hihonor.controlcenter")
         if (ballId == 0) {
             diag("icon", "id=0")
@@ -1680,18 +1699,27 @@ object ControlCenterNoiseHook : HookContext() {
 
     /** 从图标 View 往上找，看这个球的名字是不是我们的设备名。 */
     private fun belongsToOurBall(icon: android.view.View): Boolean {
+        // ★ 3.0.9 收窄：锚点只认球自己的 `device_ball_name`，不再认卡片头部的
+        //   `device_name`。3.0.8 的根因正在于此：fixBallIcon 从 rootView 全树
+        //   遍历所有 icon_image_view，旧判定两个名字都认 —— 卡头那张图的
+        //   ImageView 与卡头 device_name 在同一子树，于是被误判成「球的图标」，
+        //   被换成 device_icon_default_earphone 的原始 504 位图且不设
+        //   bounds/scaleType；展开卡片断开态布局下就撑成一张白色写实大图，
+        //   把 3.0.8「卡头完全恢复宿主原生、模块零干预」的方针架空了。
+        //   （连接态观感正常只是该位图被在线布局的容器约束住了，并非没被换。）
+        //   额外保险：往上爬时若某一层先出现 `device_name`（卡片子树特征）
+        //   而还没遇到 device_ball_name，说明身处卡片子树，直接判否。
         // 精确判定：从图标往上，第一个能找到 `device_ball_name` 的层级就是这颗球本身，
         // 直接读它的名字 —— 比「子树里有没有 OUR_NAME」可靠得多
         // （球是在同一个 RecyclerView 里，往上爬两层就能看见别的球，会误伤）。
         var node: android.view.View? = icon
         var depth = 0
         while (node != null && depth < 8) {
-            // 球用 device_ball_name，卡片头部用 device_name —— 两个都要认
-            val nameView = (findByIdName(node, "device_ball_name") ?: findByIdName(node, "device_name"))
-                as? android.widget.TextView
-            if (nameView != null) {
-                return nameView.text?.toString()?.trim() == OUR_NAME
+            val ballName = findByIdName(node, "device_ball_name") as? android.widget.TextView
+            if (ballName != null) {
+                return ballName.text?.toString()?.trim() == OUR_NAME
             }
+            if (findByIdName(node, "device_name") != null) return false
             node = node.parent as? android.view.View
             depth++
         }
