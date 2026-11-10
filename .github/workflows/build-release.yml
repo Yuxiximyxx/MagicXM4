@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.19-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.20-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.19-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.20-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,49 +64,46 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.19
-          name: MagicXM4 v3.0.19 — 胶囊图标翻到动效层（撤位图位换图）
+          tag_name: v3.0.20
+          name: MagicXM4 v3.0.20 — 小胶囊探针（纯取证，只记不换）
           body: |
-            ## MagicXM4 3.0.19（叠在 3.0.18 之上）
+            ## MagicXM4 3.0.20（叠在 3.0.19 之上）
 
-            胶囊图标二选一已由真机判完，本版按结论翻面；通知
-            文案侧代码仍未动。
+            纯取证版：只记不换。目标是钉死「收起态小胶囊」
+            的图标位。
 
-            判案证据（LSPosed_20261110_163239 + 16:32 截图）：
-            3.0.18 的 treeSwap 在胶囊树（root=HnDynamicCardSetView、
-            texts=[已连接, WH-1000XM4]）成功换掉了 140x140
-            BitmapDrawable 位，但截图里胶囊左侧仍是入耳式图、
-            右侧 90% 环内才是头戴小图 —— 那颗位图位不是可见
-            左图（是环内小图/底图），可见左图只能是剩下唯一的
-            候选：HnCardIconLayout 子树内的
-            RemotableAnimationImageView（AnimatedImageDrawable，
-            200x200），连接动画播完停在耳塞图那一帧。
+            背景：v3.0.19 已由真机确认修好胶囊展开卡
+            （HnDynamicCardSetView 树）的图标 —— animSwap 把
+            HnCardIconLayout 内 RemotableAnimationImageView
+            （AnimatedImageDrawable，200x200）换成头戴图
+            生效，本版不许动这条链。剩下的问题是收起态：
+            状态栏顶部那条小黑胶囊（左侧小耳塞图标 + 右侧
+            电量环）的左图仍是入耳式；它不在展开卡树里
+            （没有「已连接 / WH-1000XM4」文本锚点），是另一
+            套视图，位置与图位都未知。
 
-            - 树扫描换图目标改到动效层：树验明（「已连接」+
-              「WH-1000XM4」同树）后，在 HnCardIconLayout
-              子树内取 drawable 为 AnimatedImageDrawable 的
-              那颗（类名 RemotableAnimationImageView 优先），
-              直接 setImageDrawable 换成头戴图
-              device_icon_default_earphone（沿用
-              loadCapsuleHeadphone）。
-            - 防覆盖：slotRef 记住图位，三帧扫描兼作复核 ——
-              后续帧发现它又被宿主重设回动画图，再换一次并
-              记 animRebound；已是头戴图则收工。命中记
-              animSwap（链 + 尺寸），落
-              magicxm4_diag_capsuleprobe。
-            - 140x140 位图位的换图撤掉：不再碰电量环内小图
-              （它本来显示头戴小图就对）。
-            - 不误伤：只有「已连接 + WH-1000XM4」同树才动手；
-              Free4 的胶囊树（名牌 OPPO Enco Free4）天然不
-              命中；其余通知树不碰。
+            本版新增「小胶囊探针」（只观察，绝不改图/改文案）：
+            - 设图入口采样：XM4 已连接时，ImageView 的
+              setImageResource / setImageDrawable 入参被认出
+              是耳塞家族图（entry 名命中现有名单，或
+              ConstantState 同源）即记一行 —— 图名 /
+              drawable 类名、视图类名与 id 名、祖先链
+              （≤16 层）、视图尺寸；签名去重、上限放宽到
+              120，落新键 magicxm4_diag_miniprobe，日志标
+              「▶ 小胶囊探针」。
+            - 被动树扫描：既有 setText 锚点触发、且所在树
+              root 不是 HnDynamicCardSetView 时，若树内有
+              耳塞图 ImageView，记一行 root 类名 + 全树
+              ImageView 概览（类名/图种类/尺寸/id）。
 
-            探针（treeprobe / treemiss / deferredMiss）与
-            3.0.16 的 setImage* 图标门保留不动；球图门、离线
-            段否决、响铃摘除、入口跳板、通知文案保持原样；
+            其余全部原样：animSwap / treeSwap 换图链、文案
+            代码、setImage* 名牌门、展开卡探针一律不动；
             全局 getDrawable hook 不复活。
 
-            签名与 3.0.18 同证书（SHA-256: 62F45C54…8C55），可
-            直接覆盖装。装后须强停 SystemUI 宿主进程（或等其
-            重启）才加载新代码。
+            签名与 3.0.19 同证书（SHA-256: 62F45C54…8C55），
+            可直接覆盖装。装后须强停 SystemUI 宿主进程（或
+            等其重启）才加载新代码；重连 XM4 让收起态小胶囊
+            出现一次，再导 LSPosed 日志看「▶ 小胶囊探针」行
+            即可定位图标位，下一版按实况装门。
 
           files: dist/*.apk

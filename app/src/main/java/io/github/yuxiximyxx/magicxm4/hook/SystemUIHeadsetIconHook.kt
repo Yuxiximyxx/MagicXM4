@@ -397,6 +397,13 @@ object SystemUIHeadsetIconHook : HookContext() {
     //   左图是 HnCardIconLayout 内的 RemotableAnimationImageView
     //   （AnimatedImageDrawable 200x200），换图目标改到它，并补
     //   延迟帧防宿主重设动画图覆盖（animRebound）。
+    // ★ 3.0.20：展开卡图标已收口（16:40 真机确认），本版纯取证 ——
+    //   新增「小胶囊探针」（mini*）：收起态小胶囊（状态栏顶黑条，
+    //   左小图 + 右电量环）不在展开卡树里、无文本锚点，故在 a/b
+    //   两设图入口对耳塞家族图做宽口径采样（记图名/视图类名/id/
+    //   祖先链/尺寸，落 magicxm4_diag_miniprobe），并在 setText
+    //   锚点补一轮非展开卡树的被动扫描。只记不换，换图链与文案
+    //   逻辑全部原样。
     private val CAPSULE_ICON_GUARD = object : ThreadLocal<Boolean>() {
         override fun initialValue(): Boolean = false
     }
@@ -408,6 +415,13 @@ object SystemUIHeadsetIconHook : HookContext() {
     private val CAPSULE_PROBE_PENDING: MutableSet<android.view.View> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap())
     private val CAPSULE_SWAP_PENDING: MutableSet<android.view.View> =
+        java.util.Collections.newSetFromMap(java.util.WeakHashMap())
+    // ★ 3.0.20 小胶囊探针的状态：独立去重集合与计数（采样面比胶囊
+    // 探针宽，上限单独放宽到 120），独立 diag 键 miniprobe。
+    private val MINI_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val MINI_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val MINI_TREE_PENDING: MutableSet<android.view.View> =
         java.util.Collections.newSetFromMap(java.util.WeakHashMap())
     @Volatile private var capsuleCcResources: android.content.res.Resources? = null
 
@@ -433,6 +447,133 @@ object SystemUIHeadsetIconHook : HookContext() {
         if (CAPSULE_SEEN.add(sig) && CAPSULE_TOTAL.incrementAndGet() <= 40) {
             Log.w(TAG, "▶ 胶囊图标 $msg")
             capsuleDiag(msg)
+        }
+    }
+
+    // ── ★ 3.0.20 小胶囊探针（只记不换）──────────────────────────
+    private fun miniDiag(value: String) {
+        runCatching {
+            val app = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+                ?: return@runCatching
+            android.provider.Settings.Global.putString(
+                app.contentResolver, "magicxm4_diag_miniprobe", value.take(1000)
+            )
+        }
+    }
+
+    private fun miniLog(sig: String, msg: String) {
+        if (MINI_SEEN.add(sig) && MINI_TOTAL.incrementAndGet() <= 120) {
+            Log.w(TAG, "▶ 小胶囊探针 $msg")
+            miniDiag(msg)
+        }
+    }
+
+    private fun miniViewIdName(view: android.view.View): String {
+        val id = view.id
+        if (id == android.view.View.NO_ID) return "-"
+        return runCatching { view.resources.getResourceEntryName(id) }.getOrNull() ?: "-"
+    }
+
+    /** a) 入口采样：setImageResource 的入参 entry 名已认明是耳塞家族图时记一行。 */
+    private fun miniObserveRes(view: android.widget.ImageView, entry: String) {
+        runCatching {
+            val chain = capsuleAncestorChain(view)
+            miniLog(
+                "res|$entry|${view.javaClass.simpleName}|${miniViewIdName(view)}|" +
+                    "${view.width}x${view.height}|${chain.hashCode()}",
+                "setRes img=$entry view=${view.javaClass.simpleName} " +
+                    "id=${miniViewIdName(view)} viewSize=${view.width}x${view.height} " +
+                    "chain=$chain"
+            )
+        }
+    }
+
+    /** b) 入口采样：setImageDrawable 的入参已由 ConstantState 认明是耳塞家族图时记一行。 */
+    private fun miniObserveDrawable(
+        view: android.widget.ImageView, d: android.graphics.drawable.Drawable
+    ) {
+        runCatching {
+            val chain = capsuleAncestorChain(view)
+            miniLog(
+                "drw|${d.javaClass.simpleName}|${view.javaClass.simpleName}|" +
+                    "${miniViewIdName(view)}|${view.width}x${view.height}|${chain.hashCode()}",
+                "setDrw img=${d.javaClass.simpleName} " +
+                    "imgSize=${d.intrinsicWidth}x${d.intrinsicHeight} " +
+                    "view=${view.javaClass.simpleName} id=${miniViewIdName(view)} " +
+                    "viewSize=${view.width}x${view.height} chain=$chain"
+            )
+        }
+    }
+
+    /**
+     * 被动观察调度：setText 锚点（名牌 /「已连接」）触发后，在当前帧
+     * 与 500ms 各扫一次锚点所在树。收起态小胶囊没有文本，这条只是
+     * 顺带网 —— 万一它的图与某次文本绑定同树交付，这里能捞到。
+     * 同一锚点只挂一轮（弱引用集合防重复挂）。
+     */
+    private fun capsuleMiniTreeSchedule(anchor: android.widget.TextView, via: String) {
+        if (!MINI_TREE_PENDING.add(anchor)) return
+        val delays = longArrayOf(0L, 500L)
+        var postedAny = false
+        for (i in delays.indices) {
+            val last = i == delays.lastIndex
+            val r = Runnable {
+                capsuleMiniTreeScan(anchor, via, i)
+                if (last) MINI_TREE_PENDING.remove(anchor)
+            }
+            val ok = runCatching {
+                if (delays[i] <= 0L) anchor.post(r) else anchor.postDelayed(r, delays[i])
+            }.getOrDefault(false)
+            if (ok) postedAny = true
+        }
+        if (!postedAny) MINI_TREE_PENDING.remove(anchor)
+    }
+
+    /**
+     * 被动观察扫描：只处理「不是展开卡」的树（展开卡已由 treeprobe /
+     * animSwap 收口，不重复记）。树内任一 ImageView 是耳塞图 → 记
+     * 一行 root 类名 + 全树 ImageView 概览（类名/图种类/尺寸/id）。
+     */
+    private fun capsuleMiniTreeScan(anchor: android.view.View, via: String, frame: Int) {
+        runCatching {
+            if (!anchor.isAttachedToWindow) return@runCatching
+            var root: android.view.View = anchor
+            var depth = 0
+            while (depth < 20) {
+                val par = root.parent as? android.view.View ?: break
+                root = par
+                depth++
+            }
+            val rootName = root.javaClass.simpleName
+            if (rootName == "HnDynamicCardSetView") return@runCatching
+            val imgs = mutableListOf<String>()
+            var earbudFound = false
+            var count = 0
+            fun dfs(v: android.view.View) {
+                if (++count > 240) return
+                if (v is android.widget.ImageView) {
+                    val kind = capsuleDrawableKind(v, v.drawable)
+                    if (kind == "earbud") earbudFound = true
+                    val d = v.drawable
+                    val size = if (d != null) "${d.intrinsicWidth}x${d.intrinsicHeight}" else "-"
+                    imgs.add(
+                        "${v.javaClass.simpleName}[kind=$kind size=$size " +
+                            "id=${miniViewIdName(v)}]"
+                    )
+                }
+                if (v is android.view.ViewGroup) {
+                    for (i in 0 until v.childCount) dfs(v.getChildAt(i))
+                }
+            }
+            dfs(root)
+            if (earbudFound) {
+                miniLog(
+                    "tree|$via|$rootName|${imgs.joinToString(",").hashCode()}",
+                    "tree via=$via frame=$frame root=$rootName " +
+                        "imgs(${imgs.size})=${imgs.take(8)}"
+                )
+            }
         }
     }
 
@@ -548,6 +689,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                         view.resources.getResourceEntryName(resId)
                     }.getOrNull()
                     if (entry != null && CAPSULE_EARBUD_NAMES.contains(entry)) {
+                        miniObserveRes(view, entry)
                         if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME)) {
                             val head = loadCapsuleHeadphone(view)
                             if (head != null) {
@@ -590,6 +732,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                 val d = chain.args.getOrNull(0) as? android.graphics.drawable.Drawable
                 if (view != null && d != null && !CAPSULE_ICON_GUARD.get() && isXm4Connected()) {
                     if (isCapsuleEarbudDrawable(view, d)) {
+                        miniObserveDrawable(view, d)
                         if (capsuleTreeContainsText(view, CAPSULE_OUR_NAME)) {
                             val head = loadCapsuleHeadphone(view)
                             if (head != null) {
@@ -642,6 +785,8 @@ object SystemUIHeadsetIconHook : HookContext() {
         //    原样 proceed，绝不改文本（文案侧 0/0b 的逻辑不碰）。
         //    ★ 3.0.18 追记：探针已钉死图标位（见 capsuleTreeSwapScan
         //    头注），同一锚点除探针外再调度一轮树扫描换图。
+        //    ★ 3.0.20 追记：同锚点再调度一轮小胶囊被动观察
+        //    （capsuleMiniTree*），只记非展开卡树里的耳塞图。
         runCatching {
             val m = Class.forName("android.widget.TextView").declaredMethods.first {
                 it.name == "setText" && it.parameterCount == 1 &&
@@ -654,6 +799,7 @@ object SystemUIHeadsetIconHook : HookContext() {
                 if (view != null && (t == CAPSULE_OUR_NAME || t == "已连接")) {
                     capsuleTreeProbeSchedule(view, "setText")
                     capsuleTreeSwapSchedule(view, "setText")
+                    capsuleMiniTreeSchedule(view, "setText")
                 }
                 ret
             }
@@ -661,7 +807,8 @@ object SystemUIHeadsetIconHook : HookContext() {
         }.onFailure {
             Log.w(TAG, "胶囊树探针 setText 装载失败: ${it.javaClass.simpleName}")
         }
-        capsuleDiag("installed=$installed/3 (3.0.19 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针 + 树扫描换动效层)")
+        capsuleDiag("installed=$installed/3 (3.0.20 胶囊图标: 名牌门同步换 + 多帧复核 + setText 整树探针 + 树扫描换动效层; 小胶囊探针另记 miniprobe)")
+        miniDiag("installed (3.0.20 小胶囊探针: 设图入口耳塞图采样 + 非展开卡树被动扫描, 只记不换)")
         Log.i(TAG, "installed: 胶囊图标换图入口 ($installed/3)")
     }
 
