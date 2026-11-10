@@ -473,7 +473,14 @@ object ControlCenterNoiseHook : HookContext() {
                 Log.w(TAG, "selectLayout hook 失败: ${it.javaClass.simpleName}: ${it.message}")
             }
 
-            // ── 7) 决定性观察：降噪 section 创建（区分"门③拒绝"vs"创建返回null"） ──
+            // ── 7) section 创建：观察 + ★ 3.0.11 离线数据层否决 ──
+            //   原为纯观察（区分"门③拒绝"vs"创建返回null"）。3.0.11 起在同一
+            //   挂点上做数据层否决：设备是我们的、且真实连接态为离线时，
+            //   直接返回 null 不让宿主生成电量/噪声段——create*Section 返回
+            //   null 是宿主自身的既有退出形态（LinkDevice 为 null 时它就
+            //   这么返回，gen 按「无此段」继续装配），调用方认账。卡片数据
+            //   在视图创建前就是离线形态，展开动画第一帧即目标高度，
+            //   不再需要视图层事后隐藏（见第 8/11/12 节的退役说明）。
             runCatching {
                 val mgr2 = findClass("com.hihonor.controlviewnew.deviceservicecard.DeviceServiceCardDataMgr")
                 val mNoise = mgr2.declaredMethods.filter { it.name == "createEarphoneNoiseSection" }
@@ -483,6 +490,11 @@ object ControlCenterNoiseHook : HookContext() {
                     module.hook(m).intercept { chain ->
                         val dev = chain.args.getOrNull(0)
                         val devId = runCatching { dev?.javaClass?.getMethod("getDeviceId")?.invoke(dev) }.getOrNull()
+                        if (devId != null && isOurMac(devId.toString()) && !isOurConnected()) {
+                            Log.w(TAG, "★ ${m.name}(deviceId=$devId) 真实离线 → null（数据层不装配此段）")
+                            diag("section", "${m.name} dev=$devId vetoed-offline（3.0.11）")
+                            return@intercept null
+                        }
                         val ret = chain.proceed()
                         Log.w(TAG, "▶ ${m.name}(deviceId=$devId) → ${if (ret == null) "null" else "SEC(" + ret.hashCode() + ")"}")
                         if (devId == null || isOurMac(devId.toString())) {
@@ -491,7 +503,7 @@ object ControlCenterNoiseHook : HookContext() {
                         ret
                     }
                 }
-                Log.i(TAG, "installed: createEarphoneNoise/BatterySection [section 创建观察]")
+                Log.i(TAG, "installed: createEarphoneNoise/BatterySection [创建观察+离线否决]")
             }.onFailure {
                 Log.w(TAG, "section 观察失败: ${it.javaClass.simpleName}: ${it.message}")
             }
@@ -508,23 +520,13 @@ object ControlCenterNoiseHook : HookContext() {
                     val size = (ret as? List<*>)?.size
                     Log.w(TAG, "▶ createSections(config=$config) → size=$size")
                     diag("sections", "size=$size cls=" + (ret as? List<*>)?.joinToString(",") { it?.javaClass?.simpleName ?: "null" })
-                    // 卡片装配完成 → 延迟几次把离线收缩跑一遍（图标已不归这里管，见 3.0.10）。
-                    // 断连时 updateEarphoneUIByOnlineType 不一定会触发，这里是唯一稳定的时机。
-                    runCatching {
-                        val ball = ourBallRef?.get()
-                        if (ball != null) {
-                            val online = isOurConnected()
-                            listOf(0L, 250L, 700L, 1500L).forEach { d ->
-                                ball.postDelayed({
-                                    runCatching {
-                                        val root = ball.rootView
-                                        cleanupCard(root)
-                                        applyOfflineVisibility(root, online)
-                                    }
-                                }, d)
-                            }
-                        }
-                    }
+                    // 【3.0.11 退役】原先装配完成后用 0/250/700/1500ms 的
+                    //   postDelayed 链对窗口根视图反复跑 cleanupCard +
+                    //   applyOfflineVisibility 做离线收缩——视图层事后隐藏与
+                    //   展开动画赛跑，正是断连开卡「先撑成大片空白高卡、再
+                    //   缩回」的来源之一。离线形态已改由数据层保证（第 7 节
+                    //   create*Section 离线否决 + 第 8 节 postFixSections
+                    //   摘段），这里只保留装配观察，不再延迟碰任何视图。
                     ret
                 }
                 Log.i(TAG, "installed: DeviceServiceCardDataMgr.createSections [装配观察]")
@@ -619,16 +621,13 @@ object ControlCenterNoiseHook : HookContext() {
                             //   再缩小」的来源。
                             val nameView = findByIdName(v, "device_name") as? android.widget.TextView
                             if (nameView?.text?.toString()?.trim() == OUR_NAME) {
-                                val online = isOurConnected()
-                                listOf(0L, 200L, 600L, 1400L).forEach { d ->
-                                    v.postDelayed({
-                                        runCatching {
-                                            cleanupCard(v)
-                                            applyOfflineVisibility(v, online)
-                                        }
-                                    }, d)
-                                }
-                                diag("card", "card attached online=$online")
+                                // 【3.0.11 退役】原先在 attach 后 0/200/600/1400ms
+                                //   反复跑 cleanupCard + applyOfflineVisibility——
+                                //   延迟隐藏落在展开动画中途，卡片先按含电量/
+                                //   噪声段的高度展开、隐藏落地后又缩回。离线
+                                //   形态已由数据层保证（第 7/8 节），attach
+                                //   时只记一笔诊断，不再动任何视图。
+                                diag("card", "card attached online=${isOurConnected()}")
                             }
                         }
                     }
@@ -678,12 +677,13 @@ object ControlCenterNoiseHook : HookContext() {
                                 //   取图的那一次调用内同步改回头戴图，不再需要这里
                                 //   postDelayed 事后补换（原 0/150/500ms 已全撤）。
                             }
-                            listOf(0L, 300L, 900L, 2000L).forEach { d ->
-                                self.postDelayed({ cleanupCard(self.rootView) }, d)
-                                self.postDelayed(
-                                    { applyOfflineVisibility(self.rootView, real) }, d
-                                )
-                            }
+                            // 【3.0.11 退役】原先此处在状态刷新后 0/300/900/2000ms
+                            //   反复对 rootView 跑 cleanupCard +
+                            //   applyOfflineVisibility——与 11i/7b 同属视图层赛跑
+                            //   补救（断连开卡先撑高再缩回的来源之一），离线形态
+                            //   改由数据层保证（第 7 节否决 + 第 8 节摘段）后整链
+                            //   删除。本 hook 的本职（用真实连接态替换入参，驱动
+                            //   响铃查找状态与连接文案）是数据层行为，保持不变。
                         } else {
                             diag("hide", "thisObject 不是 View: ${chain.thisObject?.javaClass?.name}")
                         }
@@ -1108,8 +1108,14 @@ object ControlCenterNoiseHook : HookContext() {
                         //   gen 是在线卡数据的必经点，直接把跨进程电量写进 info。
                         if (isOurMac(devId?.toString()) && ret != null) {
                             // ★ FIX-006：数据级修正（连接文案 + 响铃查找可用）
-                            postFixSections(ret, isOurConnected())
-                            val bat = batteryLevelForCard()
+                            val onlineNow = isOurConnected()
+                            postFixSections(ret, onlineNow)
+                            // ★ 3.0.11：电量打桩只在真实连接时做。离线时跨进程
+                            //   电量是断连前的残值，写进 info 会让
+                            //   hasBatteryInfo()=true → 卡头小电池照常渲染，
+                            //   与原生离线卡（无电量）不符；离线形态应由数据
+                            //   层从一开始就不带电量（在线路径行为不变）。
+                            val bat = if (onlineNow) batteryLevelForCard() else null
                             if (bat != null) {
                                 runCatching {
                                     ret.javaClass.getMethod("setBatteryLevel", Int::class.javaPrimitiveType)
@@ -1174,32 +1180,17 @@ object ControlCenterNoiseHook : HookContext() {
                     //   真实在线态必须读 magicxm4_connected。
                     val cardView = cardRet as? android.view.View
                     if (cardView != null) {
-                        val realOnline = isOurConnected()
-                        // ★ 消除「先闪一下完整卡片」：
-                        //   即使同步改 GONE，宿主仍会先按旧状态播一次展开动画（实测能看到
-                        //   「已连接卡片 → 未连接卡片」的跳变）。这里让卡片先透明一帧，
-                        //   等第一次清理落地后再显示 —— 用户看到的就是直接展开成正确的样子。
-                        runCatching { cardView.alpha = 0f }
-                        try {
-                            cleanupCard(cardView)
-                            applyOfflineVisibility(cardView, realOnline)
-                        } finally {
-                            // 下一帧恢复（post 到自己的 handler，保证在首次 layout 之后）
-                            cardView.post {
-                                cardView.alpha = 1f
-                                runCatching {
-                                    cleanupCard(cardView)
-                                    applyOfflineVisibility(cardView, realOnline)
-                                }
-                            }
-                        }
-                        // 再补一次延迟扫描，兜住少数晚挂载的子 View（只一次，避免多次抖动）
-                        cardView.postDelayed({
-                            runCatching {
-                                cleanupCard(cardView)
-                                applyOfflineVisibility(cardView, realOnline)
-                            }
-                        }, 400L)
+                        // ★ 3.0.11：离线收缩改走数据层（第 7 节否决 + 第 8 节摘段），
+                        //   卡片到手时数据已是离线形态。这里【删除】了原先整套
+                        //   视图层赛跑补救：alpha=0 遮一帧 + 同步 cleanup/
+                        //   applyOfflineVisibility + post{} 再清 + 400ms 补清——
+                        //   宿主展开动画按装配高度先展开、隐藏陆续落地后又缩
+                        //   回，正是断连开卡「底部大片空白高卡 → 缩回正常高
+                        //   度」的成因。仅保留一次同步 cleanupCard：它管的是
+                        //   响铃查找/自适应两行（XM4 不支持、在线离线都要
+                        //   隐藏），在卡片 attach/动画开始前同步执行完，不
+                        //   涉及电量/噪声段的高度可见性。
+                        runCatching { cleanupCard(cardView) }
                     }
                 }
                 cardRet
@@ -1226,7 +1217,11 @@ object ControlCenterNoiseHook : HookContext() {
                 }.getOrNull()
                 if (!isOurMac(did?.toString())) return@intercept chain.proceed()
                 val v = chain.args.getOrNull(0) as? Int ?: -1
-                val bat = batteryLevelForCard()
+                // ★ 3.0.11：兜底替换只在真实连接时做——它的职责是保住在线卡
+                //   的电量打桩不被宿主的 ≤0 写入覆盖；离线时也替换会让残值
+                //   电量复活、hasBatteryInfo() 变 true，与数据层离线形态
+                //   （第 7/8 节：不装配电量段、不打桩）冲突。
+                val bat = if (isOurConnected()) batteryLevelForCard() else null
                 if (v <= 0 && bat != null && bat > 0) {
                     Log.w(TAG, "★★ setBatteryLevel($v) → $bat 兜底 ($OUR_NAME)")
                     val newArgs = chain.args.toTypedArray()
@@ -1394,11 +1389,51 @@ object ControlCenterNoiseHook : HookContext() {
      * 数据级修正服务卡 sections（FIX-006）：
      *  - QuickActionData.serviceId == to_connect_device / disconnect_device → 按真实连接态互换（含文案）
      *  - ServiceCardInfo.bsId 含 Find（响铃查找）→ ShowStatus 置 NORMAL
+     *  - ★ 3.0.11：真实离线时按 sectionType 摘除电量段/噪声段（兜底清扫，
+     *    主路径是第 7 节 create*Section 的离线否决）
      * 只改数据、不碰 View，也不依赖上游「在线态通知」方法是否被调用。
      */
     private fun postFixSections(info: Any, connected: Boolean) {
         runCatching {
             val secs = info.javaClass.getMethod("getServiceSections").invoke(info) as? List<*> ?: return
+            // ★ 3.0.11 离线摘段（数据层兜底）：真实离线时，把电量段/噪声段
+            //   从 sections 里整段摘除。主路径是第 7 节 create*Section 的
+            //   离线否决（宿主压根不生成这两段）；这里防的是装配路径有
+            //   变、段仍被生成出来的情况。段靠 sectionType 识别（反编译
+            //   实证：createEarphone*Section 生成时 setSectionType 的就是
+            //   EARPHONE_BATTERY / EARPHONE_NOISE 两个枚举）。本函数在 gen
+            //   返回后、卡片视图创建前执行，摘完的列表即动画第一帧的
+            //   数据。在线时整段跳过，在线行为零改动。
+            if (!connected) {
+                val before = secs.size
+                var sawType = false
+                val kept = secs.filterNot { sec ->
+                    val t = runCatching {
+                        sec?.javaClass?.getMethod("getSectionType")?.invoke(sec)?.toString()
+                    }.getOrNull()
+                    if (t != null) sawType = true
+                    t == "EARPHONE_BATTERY" || t == "EARPHONE_NOISE"
+                }
+                if (!sawType) {
+                    diag("sections_sweep", "getSectionType 全空，摘段未生效（getter 名待核）")
+                } else if (kept.size != before) {
+                    var applied = false
+                    runCatching {
+                        @Suppress("UNCHECKED_CAST")
+                        val m = secs as MutableList<Any?>
+                        m.clear()
+                        m.addAll(kept)
+                        applied = true
+                    }
+                    if (!applied) runCatching {
+                        info.javaClass.declaredMethods.firstOrNull {
+                            it.name == "setServiceSections" && it.parameterCount == 1
+                        }?.apply { isAccessible = true }?.invoke(info, kept)
+                        applied = true
+                    }
+                    diag("sections_sweep", "离线摘段 $before→${kept.size} applied=$applied（3.0.11）")
+                }
+            }
             var changed = 0
             for (sec in secs) {
                 if (sec == null) continue

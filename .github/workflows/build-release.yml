@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.10-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.11-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.10-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.11-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,41 +64,44 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.10
-          name: MagicXM4 v3.0.10 — 修展开动画图标先变大再缩小（选图入口同步改结果）
+          tag_name: v3.0.11
+          name: MagicXM4 v3.0.11 — 修断连开卡先撑高再缩回（离线形态回到数据层）
           body: |
-            ## MagicXM4 3.0.10（换机制修复，叠在 3.0.9 之上）
+            ## MagicXM4 3.0.11（回到数据层，叠在 3.0.10 之上）
 
-            只修一件：点球展开卡片时图标仍「先变大再缩小」
-            （3.0.9 真机复验仍在，用户 12:09 录屏实证）。通知门控
-            与其余逻辑与 3.0.9 一致，卡头继续零干预。
+            只修一件：XM4 未连接时点球展开卡片，卡片先撑成一张
+            「底部大片空白」的高卡、再缩回正常高度。与图标无关
+            （3.0.10 的图标机制本版未动）。
 
-            根因（换机制）：3.0.8/3.0.9 的球图标靠 fixBallIcon
-            视图树手术 + postDelayed（attach 的 0/120/400/1000ms、
-            状态刷新的 0/150/500ms）在绘制后换 drawable。展开的
-            morph 动画全程按宿主 BasicDeviceBallView.initIcon
-            选定的图做测量与飞行，迟到的换图一律在飞行中被重新
-            测量 —— 判定收窄到球本体、动画窗口跳过都堵不住，
-            因为错的是换图时机本身。
+            根因：模块把球的 isOnline 强制为 true，宿主按在线形态
+            装配整卡（含电量段/噪声段）；模块再在视图层事后隐藏
+            （alpha 遮帧 + 多处 0~2000ms 的 postDelayed 反复清）。
+            展开动画按装配时的高度先展开，隐藏陆续落地后又缩回
+            ——视图层补救与动画赛跑，治不住。
 
-            本版改法：hook 宿主自己的选图交付入口，在宿主取图的
-            那一次调用内同步改结果，模块从不在绘制后换球的图：
-            - ImageView.setImageResource(int)：图标位往上找到所属
-              的球、是 XM4 的球时把入参的耳塞图 id 换成宿主头戴图
-              device_icon_default_earphone 再 proceed（主路径）；
-            - Resources.getDrawable(int)/(int,Theme) 与
-              Context.getDrawable(int)：调用栈有 BasicDeviceBallView
-              且在场球里有 XM4 的球时，同样换入参再 proceed。
-            球的归属判定走它所持 DeviceInfo 的 MAC/名字（与模块
-            注入的身份一致），文案 device_ball_name 只作兜底。
-            fixBallIcon 本体与全部 postDelayed 换图触发已删除；
-            装载时会把球的图标相关方法面打进 diag 备查
-            （initicon_surface）。
+            本版改法（回到数据层，与 postFixSections 同层）：
+            - createEarphoneBatterySection / createEarphoneNoiseSection
+              在「设备是 XM4 且真实离线」时直接返回 null：返回 null
+              是宿主自身既有的退出形态（LinkDevice 为 null 时它就
+              这么返回），宿主从一开始就不装配这两段；
+            - postFixSections 离线兜底清扫：按 sectionType
+              （EARPHONE_BATTERY / EARPHONE_NOISE）摘除残段；
+            - 电量打桩与 setBatteryLevel 兜底替换改为只在真实连接
+              时生效，离线不让断连前的残值电量复活；
+            - 视图层赛跑补救整套删除：createDeviceServiceCard 的
+              alpha 遮帧、createSections / attach /
+              updateEarphoneUIByOnlineType 三处 postDelayed
+              清理链。仅保留 createDeviceServiceCard 返回后一次
+              同步 cleanupCard（只管响铃查找/自适应两行，不涉及
+              电量/噪声段高度）。
+            在线路径零改动：连接时电量段、噪声段、四档控制与
+            3.0.10 完全一致。
 
-            签名与 3.0.9 同证书（SHA-256: 62F45C54…8C55），可直接
+            签名与 3.0.10 同证书（SHA-256: 62F45C54…8C55），可直接
             覆盖装。
 
-            待真机验证：点球展开卡片，图标全程一个尺寸滑过去，
-            不再先变大再缩小；球本身图标为宿主头戴图。
+            待真机验证：XM4 断开时点球展开，卡片点开就是正常
+            高度（底部不再先出现大片空白再缩回）；连上 XM4 时
+            电量/噪声控制如常。
 
           files: dist/*.apk
