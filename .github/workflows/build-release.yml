@@ -96,3 +96,5 @@ jobs:
             待真机取证：装后打开全屏球阵页一次即可（探针自动记录），
             随后导出 LSPosed 日志或读 magicxm4_diag_gridprobe /
             magicxm4_diag_gridprobe_name 两个值，下一版按实况装门。
+
+          files: dist/*.apk
