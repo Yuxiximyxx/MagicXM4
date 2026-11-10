@@ -31,31 +31,11 @@ import kotlin.concurrent.thread
 object SystemUIHeadsetIconHook : HookContext() {
     private const val TAG = "MagicXM4-SystemUI"
 
-    /**
-     * 读跨进程单电量 → "电量 90%"。
-     * ★ 3.0.16：XM4 是头戴、只有一颗总电量，原 TWS 双耳拼法
-     * （"左耳 x% 右耳 y%"）在通知行渲染成「左耳 90% 右耳 --%」：
-     * 写入端 magicxm4_battery 是 "L,R,C" 三段，旧解析对第二段拼着
-     * ",C.." 必然解析失败，右耳恒 --%。XM4 的真数据模型是单值：
-     * RfcommController.onSonyBattery 另写 magicxm4_battery_single，
-     * 优先读它；兜底取 magicxm4_battery 的 L 段（喂入时 L==总电量，
-     * L/R 同值只是借道双耳结构）。文案跟本模块单值惯例：详情页单环
-     * 标签「电量」、胶囊环纯百分比 —— 通知行作「电量 90%」，不再
-     * 出现左右耳模板。本 hook 只服务 XM4 本人（改写另有连接门控），
-     * Free4 的三段电量通知在 MagicPods 自己的模块里，不受影响。
-     */
-    private fun readBatteryLine(): String = runCatching {
-        val app = Class.forName("android.app.ActivityThread")
-            .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
-            ?: return "电量 --%"
-        val single = android.provider.Settings.Global
-            .getString(app.contentResolver, "magicxm4_battery_single")?.toIntOrNull()
-        if (single != null && single in 0..100) return "电量 $single%"
-        val raw = android.provider.Settings.Global.getString(app.contentResolver, "magicxm4_battery")
-            ?: return "电量 --%"
-        val l = raw.substringBefore(',').removePrefix("L").toIntOrNull()
-        if (l != null && l in 0..100) "电量 $l%" else "电量 --%"
-    }.getOrDefault("电量 --%")
+    // ★ 3.0.16 更正：原 readBatteryLine（把通知里的设备名行改写成电量行，
+    // 先 TWS 双耳拼法、后单值「电量 x%」）已整段删除 —— 用户点名这条通知
+    // 只显示设备名、不带任何电量信息，两处改写入口（apply 遍历 / setText
+    // 终防线）均已停掉名字行分支。跨进程电量键本身保留：设备卡与详情页
+    // 仍在读 magicxm4_battery / magicxm4_battery_single，不受影响。
 
     /**
      * ★ 3.0.8 连接门控：文案改写只在 XM4 本人是当前已连接的 A2DP 设备时才许动。
@@ -103,9 +83,12 @@ object SystemUIHeadsetIconHook : HookContext() {
                         var changed = 0
                         fun walk(v: android.view.View) {
                             if (v is android.widget.TextView) {
-                                when (val cur = v.text?.toString() ?: "") {
-                                    "当前音频输入输出设备" -> { v.text = "WH-1000XM4"; changed++ }
-                                    "WH-1000XM4" -> { v.text = readBatteryLine(); changed++ }
+                                // ★ 3.0.16 更正（用户点名）：名字行不再改写成
+                                // 电量行 —— 这条通知的目标形态就是显示设备名
+                                // 本身、不带任何电量信息。只保留占位标题 →
+                                // 设备名一处改写，结果标题/内容都是名字。
+                                if ((v.text?.toString() ?: "") == "当前音频输入输出设备") {
+                                    v.text = "WH-1000XM4"; changed++
                                 }
                             } else if (v is android.view.ViewGroup) {
                                 for (i in 0 until v.childCount) walk(v.getChildAt(i))
@@ -135,11 +118,12 @@ object SystemUIHeadsetIconHook : HookContext() {
             }.apply { isAccessible = true }
             module.hook(m).intercept { chain ->
                 val t = (chain.args.getOrNull(0) as? CharSequence)?.toString()
-                if (isXm4Connected() && (t == "当前音频输入输出设备" || t == "WH-1000XM4")) {
-                    val out = if (t == "当前音频输入输出设备") "WH-1000XM4" else readBatteryLine()
-                    Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → '$out'")
+                // ★ 3.0.16 更正：只改占位标题 → 设备名；设备名本身原样
+                // 放行（此前会被改写成电量行，用户点名不要任何电量信息）。
+                if (isXm4Connected() && t == "当前音频输入输出设备") {
+                    Log.w(TAG, "★★★★ TextView.setText 改写: '$t' → 'WH-1000XM4'")
                     val newArgs = chain.args.toTypedArray()
-                    newArgs[0] = out
+                    newArgs[0] = "WH-1000XM4"
                     return@intercept chain.proceed(newArgs)
                 }
                 chain.proceed()
