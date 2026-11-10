@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.20-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.21-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.20-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.21-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,46 +64,43 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.20
-          name: MagicXM4 v3.0.20 — 小胶囊探针（纯取证，只记不换）
+          tag_name: v3.0.21
+          name: MagicXM4 v3.0.21 — 窗口扫描探针（事件驱动取证，只记不换）
           body: |
-            ## MagicXM4 3.0.20（叠在 3.0.19 之上）
+            ## MagicXM4 3.0.21（叠在 3.0.20 之上）
 
-            纯取证版：只记不换。目标是钉死「收起态小胶囊」
-            的图标位。
+            仍是纯取证版：只记不换。但换了取证方法 ——
+            3.0.20 沿 ImageView.setImage* 入口蹲守「小胶囊
+            探针」在真机零命中（新码确认在跑、展开卡那轮未
+            出现），结论：收起态小胶囊的图不是经 setImage*
+            递进来的（或连接瞬间模块的连接门未成立），蹲
+            设图入口这条路走不通。
 
-            背景：v3.0.19 已由真机确认修好胶囊展开卡
-            （HnDynamicCardSetView 树）的图标 —— animSwap 把
-            HnCardIconLayout 内 RemotableAnimationImageView
-            （AnimatedImageDrawable，200x200）换成头戴图
-            生效，本版不许动这条链。剩下的问题是收起态：
-            状态栏顶部那条小黑胶囊（左侧小耳塞图标 + 右侧
-            电量环）的左图仍是入耳式；它不在展开卡树里
-            （没有「已连接 / WH-1000XM4」文本锚点），是另一
-            套视图，位置与图位都未知。
-
-            本版新增「小胶囊探针」（只观察，绝不改图/改文案）：
-            - 设图入口采样：XM4 已连接时，ImageView 的
-              setImageResource / setImageDrawable 入参被认出
-              是耳塞家族图（entry 名命中现有名单，或
-              ConstantState 同源）即记一行 —— 图名 /
-              drawable 类名、视图类名与 id 名、祖先链
-              （≤16 层）、视图尺寸；签名去重、上限放宽到
-              120，落新键 magicxm4_diag_miniprobe，日志标
-              「▶ 小胶囊探针」。
-            - 被动树扫描：既有 setText 锚点触发、且所在树
-              root 不是 HnDynamicCardSetView 时，若树内有
-              耳塞图 ImageView，记一行 root 类名 + 全树
-              ImageView 概览（类名/图种类/尺寸/id）。
+            本版改事件驱动 + 全窗口定版扫描（新探针
+            「窗口扫描」，落键 magicxm4_diag_winprobe）：
+            - 触发源：既有 A2DP 广播接收器的 CONNECTED
+              分支（设备已过 isOriGPod 验明）与开机恢复
+              路径，在连接事件后 800ms / 2500ms 各扫一次；
+              同一轮连接只武装一次。
+            - 扫描面：经 WindowManagerGlobal 枚举 SystemUI
+              全部根视图逐棵 DFS，记录每颗 ImageView 的图
+              种类（含耳塞同源判定）/ 尺寸 / 屏幕坐标 /
+              祖先链，以及每棵树的 TextView 文本概览；
+              耳塞同源图加 EARBUD 标记、屏幕顶部
+              （y<200px）的图位加 TOP 标记 —— 收起态小
+              胶囊就在状态栏顶部。
+            - 结果分段写 magicxm4_diag_winprobe（带序号），
+              并逐行打进 LSPosed 日志（标「▶ 窗口扫描」）；
+              签名去重防刷屏。
 
             其余全部原样：animSwap / treeSwap 换图链、文案
-            代码、setImage* 名牌门、展开卡探针一律不动；
-            全局 getDrawable hook 不复活。
+            代码、setImage* 名牌门、既有探针一律不动；
+            本版绝不改任何图标、任何文案。
 
-            签名与 3.0.19 同证书（SHA-256: 62F45C54…8C55），
-            可直接覆盖装。装后须强停 SystemUI 宿主进程（或
-            等其重启）才加载新代码；重连 XM4 让收起态小胶囊
-            出现一次，再导 LSPosed 日志看「▶ 小胶囊探针」行
-            即可定位图标位，下一版按实况装门。
-
+            签名与 3.0.20 同证书（SHA-256: 62F45C54…8C55），
+            可直接覆盖装。装后须强停 SystemUI 宿主进程才
+            加载新代码；重连一次 XM4、让收起态小胶囊在
+            顶部停留几秒，再导 LSPosed 日志看「▶ 窗口
+            扫描」行即可钉死小胶囊图标位，下一版按实况
+            装门。
           files: dist/*.apk

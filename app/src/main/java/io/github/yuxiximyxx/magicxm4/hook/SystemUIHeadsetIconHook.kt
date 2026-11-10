@@ -263,6 +263,8 @@ object SystemUIHeadsetIconHook : HookContext() {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     safeAddConnected(device.address)
+                    // ★ 3.0.21 窗口扫描探针：连接事件驱动，延迟全窗口扫描取证。
+                    winProbeSchedule(context, device)
                 }
                 BluetoothProfile.STATE_DISCONNECTED, BluetoothProfile.STATE_DISCONNECTING -> {
                     safeRemoveConnected(device.address)
@@ -310,6 +312,8 @@ object SystemUIHeadsetIconHook : HookContext() {
                             }.onFailure { Log.w(TAG, "connectedDevices query failed", it) }
                             connectedAddresses.clear()
                             connectedAddresses.addAll(freshConnected)
+                            // ★ 3.0.21：开机/进程重启时已连着 XM4 也武装一次窗口扫描。
+                            if (freshConnected.isNotEmpty()) winProbeSchedule(context, null)
                             mainHandler.post { safeUpdateIcon(context) }
                         } catch (e: Throwable) {
                             Log.e(TAG, "onServiceConnected failed", e)
@@ -672,6 +676,154 @@ object SystemUIHeadsetIconHook : HookContext() {
         val id = capsuleResIdByName(cc, CAPSULE_HEADPHONE_NAME, "com.hihonor.controlcenter")
         if (id == 0) return null
         return runCatching { cc.getDrawable(id, view.context?.theme) }.getOrNull()
+    }
+
+    // ── ★ 3.0.21 窗口扫描探针（只记不换）────────────────────────
+    // 3.0.20 沿 setImage* 入口蹲守零命中：收起态小胶囊的图不是经
+    // setImage* 递进来的（或连接瞬间连接门未成立）。本版改事件驱动：
+    // 蓝牙连接事件（既有 A2DP 接收器 CONNECTED 分支与开机恢复路径
+    // 调用 winProbeSchedule）后 800ms / 2500ms 两次，经
+    // WindowManagerGlobal 枚举本进程全部根视图逐棵 DFS，把每颗
+    // ImageView 的图种类（capsuleDrawableKind，内含耳塞同源判定）/
+    // 尺寸/屏幕坐标/祖先链与每棵树的文本概览整段记录；位于顶部
+    // （y<200px）的图位加 TOP 标记。仍然只记不换。
+    private val WIN_SEEN: MutableSet<String> =
+        java.util.Collections.synchronizedSet(mutableSetOf())
+    private val WIN_TOTAL = java.util.concurrent.atomic.AtomicInteger(0)
+    private val WIN_SCAN_SEQ = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var winProbeArmed = false
+
+    private fun winDiag(key: String, value: String) {
+        runCatching {
+            val app = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentApplication").invoke(null) as? android.content.Context
+                ?: return@runCatching
+            android.provider.Settings.Global.putString(
+                app.contentResolver, key, value.take(3900)
+            )
+        }
+    }
+
+    /** 连接事件武装：同一轮连接只排一次（2500ms 帧跑完后自动卸防）。 */
+    private fun winProbeSchedule(context: Context, device: BluetoothDevice?) {
+        if (winProbeArmed) return
+        winProbeArmed = true
+        val scanId = WIN_SCAN_SEQ.incrementAndGet()
+        val devInfo = runCatching {
+            val n = device?.name?.takeIf { it.isNotBlank() } ?: "?"
+            val a = device?.address ?: "?"
+            "$n@$a"
+        }.getOrDefault("?")
+        Log.w(TAG, "▶ 窗口扫描 armed scan=$scanId dev=$devInfo conn=${isXm4Connected()}")
+        winDiag("magicxm4_diag_winprobe", "armed scan=$scanId dev=$devInfo")
+        mainHandler.postDelayed({ winProbeScan(scanId, 800) }, 800)
+        mainHandler.postDelayed({ winProbeScan(scanId, 2500) }, 2500)
+    }
+
+    /** 本进程全部窗口根视图：优先 mViews，回退 mRoots→getView()。 */
+    private fun winRootViews(): List<android.view.View> {
+        runCatching {
+            val cls = Class.forName("android.view.WindowManagerGlobal")
+            val inst = cls.getMethod("getInstance").invoke(null) ?: return emptyList()
+            val f = cls.getDeclaredField("mViews").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val views = f.get(inst) as? List<android.view.View>
+            if (!views.isNullOrEmpty()) return views.toList()
+        }
+        return runCatching {
+            val cls = Class.forName("android.view.WindowManagerGlobal")
+            val inst = cls.getMethod("getInstance").invoke(null) ?: return emptyList()
+            val f = cls.getDeclaredField("mRoots").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val roots = f.get(inst) as? List<Any> ?: return emptyList()
+            roots.mapNotNull { r ->
+                runCatching {
+                    r.javaClass.getMethod("getView").invoke(r) as? android.view.View
+                }.getOrNull()
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun winProbeScan(scanId: Int, frame: Int) {
+        try {
+            if (!isXm4Connected()) {
+                Log.w(TAG, "▶ 窗口扫描 skip scan=$scanId frame=${frame}ms reason=notConnected")
+                return
+            }
+            val roots = winRootViews()
+            val lines = mutableListOf<String>()
+            var topImgs = 0
+            var earbudImgs = 0
+            lines.add("scan=$scanId frame=${frame}ms roots=${roots.size}")
+            roots.forEachIndexed { ri, root ->
+                val texts = mutableListOf<String>()
+                val imgLines = mutableListOf<String>()
+                var nodes = 0
+                fun dfs(v: android.view.View) {
+                    if (++nodes > 1200) return
+                    if (v is android.widget.TextView) {
+                        val t = v.text?.toString()?.trim().orEmpty()
+                        if (t.isNotEmpty() && texts.size < 14 && !texts.contains(t)) texts.add(t)
+                    }
+                    if (v is android.widget.ImageView) {
+                        val d = runCatching { v.drawable }.getOrNull()
+                        val loc = IntArray(2)
+                        runCatching { v.getLocationOnScreen(loc) }
+                        val kind = capsuleDrawableKind(v, d)
+                        val top = loc[1] in 0..200
+                        if (top) topImgs++
+                        if (kind == "earbud") earbudImgs++
+                        val flags = buildString {
+                            if (kind == "earbud") append(" EARBUD")
+                            if (top) append(" TOP")
+                        }
+                        val chain = capsuleAncestorChain(v)
+                        val line = "img ${v.javaClass.simpleName}[kind=$kind " +
+                            "size=${d?.intrinsicWidth ?: -1}x${d?.intrinsicHeight ?: -1} " +
+                            "view=${v.width}x${v.height} at=${loc[0]},${loc[1]} " +
+                            "id=${miniViewIdName(v)}$flags chain=$chain]"
+                        val sig = "r$ri|$chain|$kind|${loc[0]},${loc[1]}"
+                        if (WIN_SEEN.add(sig) && WIN_TOTAL.incrementAndGet() <= 400) {
+                            imgLines.add(line)
+                        }
+                    }
+                    if (v is android.view.ViewGroup) {
+                        for (i in 0 until v.childCount) dfs(v.getChildAt(i))
+                    }
+                }
+                runCatching { dfs(root) }
+                lines.add("root#$ri ${root.javaClass.simpleName} nodes=$nodes texts=$texts")
+                lines.addAll(imgLines)
+            }
+            // 分段落盘（带序号）＋逐行进 LSPosed 日志
+            var seg = 0
+            val sb = StringBuilder()
+            fun flush() {
+                if (sb.isEmpty()) return
+                seg++
+                winDiag("magicxm4_diag_winprobe_${scanId}_${frame}_$seg", sb.toString())
+                sb.setLength(0)
+            }
+            for (line in lines) {
+                Log.w(TAG, "▶ 窗口扫描 $line")
+                if (sb.length + line.length > 2600) flush()
+                sb.append(line).append('\n')
+            }
+            flush()
+            winDiag(
+                "magicxm4_diag_winprobe",
+                "scan=$scanId frame=${frame}ms roots=${roots.size} segs=$seg " +
+                    "topImgs=$topImgs earbudImgs=$earbudImgs done"
+            )
+            Log.w(
+                TAG, "▶ 窗口扫描 done scan=$scanId frame=${frame}ms " +
+                    "roots=${roots.size} segs=$seg topImgs=$topImgs earbudImgs=$earbudImgs"
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "▶ 窗口扫描 failed scan=$scanId frame=${frame}ms: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            if (frame >= 2500) winProbeArmed = false
+        }
     }
 
     private fun installCapsuleIconHook() {
