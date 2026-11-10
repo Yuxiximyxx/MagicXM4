@@ -309,14 +309,6 @@ class EarphoneDetailActivity : ComponentActivity() {
                         3 -> GesturePage(gestRaw = gestRaw, onPick = { showGestPick = it })
                         6 -> AboutPage(
                             mac = mac, firmware = firmware, caps = caps,
-                            onOpenModuleSettings = {
-                                runCatching {
-                                    startActivity(
-                                        Intent(this@EarphoneDetailActivity, MainActivity::class.java)
-                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    )
-                                }
-                            },
                         )
                         7 -> BatteryHistoryPage(history = battHistory)
                         5 -> EqEditPage(
@@ -852,7 +844,6 @@ class EarphoneDetailActivity : ComponentActivity() {
         mac: String,
         firmware: String,
         caps: Set<Int>,
-        onOpenModuleSettings: () -> Unit,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -879,14 +870,8 @@ class EarphoneDetailActivity : ComponentActivity() {
                     }
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SectionTitle("模块")
-                Card20(padding = 0.dp) {
-                    Column {
-                        NavRow("模块设置", "作用域、日志、调试选项") { onOpenModuleSettings() }
-                    }
-                }
-            }
+            // 原「模块设置」NavRow 跳 MainActivity——MainActivity 自 3.0.12 起
+            //   改成直达本页的跳板、会绕回本页，故一并去掉（同 MagicPods 的处理）。
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionTitle("开源许可")
                 Card20 {

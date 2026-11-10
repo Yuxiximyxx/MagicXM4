@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.0.11-release.apk
+          cp "$SRC" dist/MagicXM4-3.0.12-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.11-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.0.12-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,44 +64,55 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.11
-          name: MagicXM4 v3.0.11 — 修断连开卡先撑高再缩回（离线形态回到数据层）
+          tag_name: v3.0.12
+          name: MagicXM4 v3.0.12 — 删卡片响铃查找（连接/离线）+ 模块入口直达详情页
           body: |
-            ## MagicXM4 3.0.11（回到数据层，叠在 3.0.10 之上）
+            ## MagicXM4 3.0.12（叠在 3.0.11 之上）
 
-            只修一件：XM4 未连接时点球展开卡片，卡片先撑成一张
-            「底部大片空白」的高卡、再缩回正常高度。与图标无关
-            （3.0.10 的图标机制本版未动）。
+            本版两项：
 
-            根因：模块把球的 isOnline 强制为 true，宿主按在线形态
-            装配整卡（含电量段/噪声段）；模块再在视图层事后隐藏
-            （alpha 遮帧 + 多处 0~2000ms 的 postDelayed 反复清）。
-            展开动画按装配时的高度先展开，隐藏陆续落地后又缩回
-            ——视图层补救与动画赛跑，治不住。
+            ### ① 展开卡删掉「响铃查找」（连接和未连接的卡都删）
 
-            本版改法（回到数据层，与 postFixSections 同层）：
-            - createEarphoneBatterySection / createEarphoneNoiseSection
-              在「设备是 XM4 且真实离线」时直接返回 null：返回 null
-              是宿主自身既有的退出形态（LinkDevice 为 null 时它就
-              这么返回），宿主从一开始就不装配这两段；
-            - postFixSections 离线兜底清扫：按 sectionType
-              （EARPHONE_BATTERY / EARPHONE_NOISE）摘除残段；
-            - 电量打桩与 setBatteryLevel 兜底替换改为只在真实连接
-              时生效，离线不让断连前的残值电量复活；
-            - 视图层赛跑补救整套删除：createDeviceServiceCard 的
-              alpha 遮帧、createSections / attach /
-              updateEarphoneUIByOnlineType 三处 postDelayed
-              清理链。仅保留 createDeviceServiceCard 返回后一次
-              同步 cleanupCard（只管响铃查找/自适应两行，不涉及
-              电量/噪声段高度）。
-            在线路径零改动：连接时电量段、噪声段、四档控制与
-            3.0.10 完全一致。
+            WH-1000XM4 没有响铃查找功能，展开卡顶部那一行是荣耀按
+            模板装配的。查清它在数据层的结构：它不是独立 section
+            （createSections 只经 create*Section 生成电量/噪声两段，
+            无生成方法可否决），而是混在某段 sectionDataList 里的
+            一个 ServiceCardInfo 数据项（bsId 含 Find，即历史上
+            FIX-006 把它置 NORMAL 放行可点的那一项）。
 
-            签名与 3.0.10 同证书（SHA-256: 62F45C54…8C55），可直接
+            改法：postFixSections 在 gen 返回后、卡片视图创建前，
+            按 bsId 把该数据项整项摘除（不带连接态条件，连接/离线
+            都摘；落地三档：数据列表原地改 → 段 setter → 段被摘空
+            时整段移除，摘完回读计数打 diag 可查）。历史上「置
+            NORMAL」的分支删除；视图层 cleanupCard 里按文案藏
+            响铃行的整套逻辑（上两层定位 + diag 视图树 dump）一并
+            清除，只保留「自适应」一颗按钮的隐藏。
+
+            装配数据里从一开始就没有这一项，在线卡展开高度不会
+            出现新的先大后小。
+
+            ### ② 模块入口照 MagicPods 改成直达详情页
+
+            - MainActivity 改为无界面跳板：onCreate 立即转发
+              EarphoneDetailActivity 并 finish，不再渲染
+              MagicXM4AppCompose 首页；
+            - manifest 本就与 MagicPods 同构（LauncherActivity
+              alias 已指向详情页、MODULE_SETTINGS 挂在
+              MainActivity），未改动，两条入口现在都直达详情页；
+            - 详情页「关于耳机」里的「模块设置」NavRow 一并去掉
+              （跳板会把人绕回详情页本身，同 MagicPods 的处理）；
+            - PopupActivity 保留不动：它仍在渲染首页 Compose，
+              是全仓仅剩的一处引用，首页 Compose 不成死代码。
+
+            其余全部不动：3.0.11 的离线电量/噪声否决、文案门控、
+            球图标同步换图保持原样。
+
+            签名与 3.0.11 同证书（SHA-256: 62F45C54…8C55），可直接
             覆盖装。
 
-            待真机验证：XM4 断开时点球展开，卡片点开就是正常
-            高度（底部不再先出现大片空白再缩回）；连上 XM4 时
-            电量/噪声控制如常。
+            待真机验证：连接与未连接两种展开卡上都没有「响铃
+            查找」一行，其余行（电量/噪声/去连接·断开连接/更多
+            设置）如常；点桌面图标或从 LSPosed 进模块设置都直达
+            耳机详情页，不闪首页。
 
           files: dist/*.apk

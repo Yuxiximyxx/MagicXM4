@@ -646,10 +646,12 @@ object ControlCenterNoiseHook : HookContext() {
             //   【3.0.10 追记】fixBallIcon 亦已退役：球图标改在第 12 节的选图
             //   入口同步改结果，模块从不在绘制后换球的图。
 
-            // ── 11c) ★ FIX-005：让「响铃查找」可点 ──
+            // ── 11c) ★ FIX-005：用真实连接态替换宿主的在线态入参 ──
             //   DeviceServiceCardAdapter.updateEarphoneUIByOnlineType(boolean) 会按在线态
-            //   把 BID_FIND_IOT_DEVICE 置为 DISABLED 且 setClickable(false)。
-            //   耳机是通过 SPP 在线的，这套在线态判断链在本机恒 false，故强制放行。
+            //   驱动卡片状态（连接文案等）。耳机是通过 SPP 在线的，这套在线态
+            //   判断链在本机恒 false，故把入参换成真实连接态。历史上它还驱动
+            //   响铃查找的 NORMAL/DISABLED；响铃查找自 3.0.12 起在数据层整项
+            //   摘除、卡上已无此行，这里不再涉及。
             runCatching {
                 // BasicDeviceBallView.updateEarphoneUIByOnlineType(z) 一处驱动两件事：
                 //   adapter.updateEarphoneUIByOnlineType(z)  → 响铃查找 NORMAL/DISABLED
@@ -665,9 +667,10 @@ object ControlCenterNoiseHook : HookContext() {
                     chain.args[0] = real
                     diag("finddevice", "updateEarphoneUIByOnlineType($real)")
                     val ret = chain.proceed()
-                    // ★ 去掉「响铃查找」：WH-1000XM4 不支持响铃。卡片上这一行是荣耀按
-                    //   布局渲染的，没法从数据侧去掉 —— 那就拿到窗口根视图后按文案找到它，
-                    //   连同它的容器一起隐藏（只隐藏 TextView 会留下一个空按钮）。
+                    // 响铃查找（WH-1000XM4 没有响铃功能）自 3.0.12 起在数据层
+                    //   去掉（postFixSections 按 bsId 整项摘除 ServiceCardInfo，
+                    //   连接/离线都摘），卡片装配时即无此行，视图层不再按文案
+                    //   隐藏。此处只剩缓存我方球 View 的本职（见下方 ourBallRef）。
                     runCatching {
                         val self = chain.thisObject as? android.view.View
                         if (self != null) {
@@ -683,17 +686,17 @@ object ControlCenterNoiseHook : HookContext() {
                             //   补救（断连开卡先撑高再缩回的来源之一），离线形态
                             //   改由数据层保证（第 7 节否决 + 第 8 节摘段）后整链
                             //   删除。本 hook 的本职（用真实连接态替换入参，驱动
-                            //   响铃查找状态与连接文案）是数据层行为，保持不变。
+                            //   连接文案等状态）是数据层行为，保持不变。
                         } else {
                             diag("hide", "thisObject 不是 View: ${chain.thisObject?.javaClass?.name}")
                         }
                     }.onFailure { Log.w(TAG, "清理卡片失败: ${it.message}") }
                     ret
                 }
-                Log.i(TAG, "installed: BasicDeviceBallView.updateEarphoneUIByOnlineType [响铃查找+连接文案]")
+                Log.i(TAG, "installed: BasicDeviceBallView.updateEarphoneUIByOnlineType [连接文案]")
                 diag("hook_finddevice", "installed")
             }.onFailure {
-                Log.w(TAG, "响铃查找 hook 失败: ${it.javaClass.simpleName}: ${it.message}")
+                Log.w(TAG, "updateEarphoneUIByOnlineType hook 失败: ${it.javaClass.simpleName}: ${it.message}")
                 diag("hook_finddevice", "fail: ${it.javaClass.simpleName}: ${it.message}")
             }
 
@@ -934,7 +937,7 @@ object ControlCenterNoiseHook : HookContext() {
                         if (v != null) {
                             // 注意：必须在延迟回调里**重新取** rootView。
                             // initModeButton 触发时按钮往往还没 attach，此刻的 rootView 就是按钮自己，
-                            // 拿它去搜「响铃查找」永远搜不到。
+                            // 拿它去搜「自适应」永远搜不到。
                             listOf(0L, 150L, 400L, 900L, 1800L).forEach { d ->
                                 v.postDelayed({ cleanupCard(v.rootView) }, d)
                             }
@@ -1107,7 +1110,7 @@ object ControlCenterNoiseHook : HookContext() {
                         //   （该段受 isOnline/info查询等多重条件控制，实测从未走到 007d）。
                         //   gen 是在线卡数据的必经点，直接把跨进程电量写进 info。
                         if (isOurMac(devId?.toString()) && ret != null) {
-                            // ★ FIX-006：数据级修正（连接文案 + 响铃查找可用）
+                            // ★ FIX-006：数据级修正（连接文案；响铃查找自 3.0.12 起改为整项摘除）
                             val onlineNow = isOurConnected()
                             postFixSections(ret, onlineNow)
                             // ★ 3.0.11：电量打桩只在真实连接时做。离线时跨进程
@@ -1186,10 +1189,12 @@ object ControlCenterNoiseHook : HookContext() {
                         //   applyOfflineVisibility + post{} 再清 + 400ms 补清——
                         //   宿主展开动画按装配高度先展开、隐藏陆续落地后又缩
                         //   回，正是断连开卡「底部大片空白高卡 → 缩回正常高
-                        //   度」的成因。仅保留一次同步 cleanupCard：它管的是
-                        //   响铃查找/自适应两行（XM4 不支持、在线离线都要
+                        //   度」的成因。仅保留一次同步 cleanupCard：它现在只管
+                        //   「自适应」一行（XM4 没有这个模式、在线离线都要
                         //   隐藏），在卡片 attach/动画开始前同步执行完，不
-                        //   涉及电量/噪声段的高度可见性。
+                        //   涉及电量/噪声段的高度可见性。响铃查找自 3.0.12
+                        //   起已在数据层（postFixSections）整项摘除，不再
+                        //   经视图层隐藏。
                         runCatching { cleanupCard(cardView) }
                     }
                 }
@@ -1388,7 +1393,13 @@ object ControlCenterNoiseHook : HookContext() {
     /**
      * 数据级修正服务卡 sections（FIX-006）：
      *  - QuickActionData.serviceId == to_connect_device / disconnect_device → 按真实连接态互换（含文案）
-     *  - ServiceCardInfo.bsId 含 Find（响铃查找）→ ShowStatus 置 NORMAL
+     *  - ★ 3.0.12：ServiceCardInfo.bsId 含 Find（响铃查找）→ 整项从段的
+     *    数据列表里摘除（连接/离线都摘）。响铃查找不是独立 section：
+     *    createSections 只经 create*Section 生成电量/噪声两段，响铃是混在
+     *    某段 sectionDataList 里的一个 ServiceCardInfo 数据项，没有生成
+     *    方法可否决——gen 返回后、卡片视图创建前摘掉数据项，就是它在
+     *    数据层最上游的关点。本函数的历史行为是把它置 NORMAL 放行可点
+     *    （FIX-006），3.0.12 按用户点名（XM4 没有响铃查找功能）改为摘除。
      *  - ★ 3.0.11：真实离线时按 sectionType 摘除电量段/噪声段（兜底清扫，
      *    主路径是第 7 节 create*Section 的离线否决）
      * 只改数据、不碰 View，也不依赖上游「在线态通知」方法是否被调用。
@@ -1434,6 +1445,88 @@ object ControlCenterNoiseHook : HookContext() {
                     diag("sections_sweep", "离线摘段 $before→${kept.size} applied=$applied（3.0.11）")
                 }
             }
+            // ★ 3.0.12 响铃查找整项摘除（无条件，连接/离线都摘）：
+            //   重新从 info 读 sections（离线摘段可能已换过列表对象），逐段
+            //   把 bsId 含 Find 的 ServiceCardInfo 从该段数据列表里摘掉。
+            //   落地三档：① 数据列表原地改；② 段的 setSectionDataList；
+            //   ③ 某段被摘空（原本只有响铃项）→ 整段从 sections 摘除
+            //   （复用离线摘段的原地改/setServiceSections 写法）。
+            //   摘完回读校验并打 diag，日志里能直接看出是否生效。
+            runCatching {
+                val curSecs = info.javaClass.getMethod("getServiceSections").invoke(info) as? List<*>
+                if (curSecs != null) {
+                    fun isFindItem(d: Any?): Boolean {
+                        if (d == null) return false
+                        val b = runCatching {
+                            d.javaClass.getMethod("getBsId").invoke(d) as? String
+                        }.getOrNull()
+                        return b != null && b.contains("Find", ignoreCase = true)
+                    }
+                    var removedItems = 0
+                    val emptiedSecs = mutableListOf<Any>()
+                    for (sec in curSecs) {
+                        if (sec == null) continue
+                        val data = runCatching {
+                            sec.javaClass.getMethod("getSectionDataList").invoke(sec) as? List<*>
+                        }.getOrNull() ?: continue
+                        if (data.none { isFindItem(it) }) continue
+                        val keptData = data.filterNot { isFindItem(it) }
+                        val n = data.size - keptData.size
+                        var appliedData = false
+                        runCatching {
+                            @Suppress("UNCHECKED_CAST")
+                            val m = data as MutableList<Any?>
+                            m.clear()
+                            m.addAll(keptData)
+                            appliedData = true
+                        }
+                        if (!appliedData) runCatching {
+                            sec.javaClass.declaredMethods.firstOrNull {
+                                it.name == "setSectionDataList" && it.parameterCount == 1
+                            }?.apply { isAccessible = true }
+                                ?.invoke(sec, java.util.ArrayList(keptData))
+                            appliedData = true
+                        }
+                        if (appliedData) {
+                            removedItems += n
+                            if (keptData.isEmpty()) emptiedSecs.add(sec)
+                        } else {
+                            diag("find_sweep", "某段数据列表不可改且无 setter，响铃项未摘（类=${sec.javaClass.simpleName}）")
+                        }
+                    }
+                    if (emptiedSecs.isNotEmpty()) {
+                        val keptSecs = curSecs.filterNot { it in emptiedSecs }
+                        var appliedSecs = false
+                        runCatching {
+                            @Suppress("UNCHECKED_CAST")
+                            val m = curSecs as MutableList<Any?>
+                            m.clear()
+                            m.addAll(keptSecs)
+                            appliedSecs = true
+                        }
+                        if (!appliedSecs) runCatching {
+                            info.javaClass.declaredMethods.firstOrNull {
+                                it.name == "setServiceSections" && it.parameterCount == 1
+                            }?.apply { isAccessible = true }?.invoke(info, keptSecs)
+                            appliedSecs = true
+                        }
+                        diag("find_sweep", "摘空段 ${emptiedSecs.size} 个整段移除 applied=$appliedSecs（3.0.12）")
+                    }
+                    // 回读校验：还剩几个响铃项
+                    var remaining = 0
+                    val verifySecs = runCatching {
+                        info.javaClass.getMethod("getServiceSections").invoke(info) as? List<*>
+                    }.getOrNull()
+                    for (sec in verifySecs ?: emptyList<Any?>()) {
+                        if (sec == null) continue
+                        val data = runCatching {
+                            sec.javaClass.getMethod("getSectionDataList").invoke(sec) as? List<*>
+                        }.getOrNull() ?: continue
+                        remaining += data.count { isFindItem(it) }
+                    }
+                    diag("find_sweep", "响铃项摘除 removed=$removedItems remaining=$remaining（3.0.12）")
+                }
+            }
             var changed = 0
             for (sec in secs) {
                 if (sec == null) continue
@@ -1461,19 +1554,9 @@ object ControlCenterNoiseHook : HookContext() {
                         }
                     }
 
-                    val bsid = runCatching { cls.getMethod("getBsId").invoke(d) as? String }.getOrNull()
-                    if (bsid != null && bsid.contains("Find", ignoreCase = true)) {
-                        runCatching {
-                            val setter = cls.declaredMethods.firstOrNull {
-                                it.name == "setShowStatus" && it.parameterCount == 1
-                            } ?: return@runCatching
-                            val normal = setter.parameterTypes[0].enumConstants
-                                ?.firstOrNull { it.toString() == "NORMAL" }
-                            setter.invoke(d, normal)
-                            changed++
-                            diag("findstatus", "$bsid → NORMAL")
-                        }
-                    }
+                    // 响铃查找（bsId 含 Find 的 ServiceCardInfo）已在上方
+                    //   3.0.12 的摘除环节整项移除，这里不再有它的处理；
+                    //   FIX-006 时代「置 NORMAL 放行可点」的分支随之删除。
                 }
             }
             diag("sections_fix", "changed=$changed connected=$connected")
@@ -1658,7 +1741,9 @@ object ControlCenterNoiseHook : HookContext() {
      * 这里向上找到「只有一个子 View 的祖先」再隐藏，正好对应那种单纯包裹型的容器。
      */
     /**
-     * 把卡片上 WH-1000XM4 不支持的入口隐藏掉：响铃查找（不支持响铃）、自适应（没有这个模式）。
+     * 把卡片上 WH-1000XM4 不支持的入口隐藏掉：自适应（没有这个模式）。
+     * 响铃查找自 3.0.12 起在数据层（postFixSections 按 bsId 摘除数据项）整项
+     * 去掉，不再经视图层隐藏。
      *
      * 为什么按文案而不是按 View id：这两个入口的 id 是 controlcenter 私有的，换个 MagicOS
      * 版本就可能变；文案是从字符串资源来的，反而更稳。匹配到之后连同「只装着它一个子 View」
@@ -2063,42 +2148,32 @@ object ControlCenterNoiseHook : HookContext() {
         // ★ 3.0.10：球图标不在这里换了 —— fixBallIcon 视图树手术整体退役，
         //   改走宿主选图入口同步改结果（onHook 第 12 节）。卡片清理只管它
         //   本来的事（隐藏无用行等），不再碰任何图标。
+        // ★ 3.0.12：响铃查找已改走数据层整项摘除（postFixSections 按 bsId
+        //   摘 ServiceCardInfo 数据项，连接/离线都摘），卡片装配时即无此
+        //   行，这里不再按文案藏它——原先为它写的「上两层 = 整张子卡」
+        //   定位与 diag 视图树 dump 随之删除。本函数只剩「自适应」一颗
+        //   噪声档位按钮的隐藏（与 11e initModeButton 里的直接隐藏互为
+        //   兜底：卡片重建会重置可见性，两处谁先碰到谁生效）。
         // 卡片真的画出来了 = 宿主进程已经活透，此时拿 Context 最稳。
         HonorAssetsDump.dump(currentApp())
         var hidden = 0
-        for (text in listOf("响铃查找", "自适应")) {
-            val target = findTextView(root, text) ?: continue
+        val target = findTextView(root, "自适应")
+        if (target != null) {
             // ★ 判定「这一处是不是我们的卡片」：从目标文案往上找，第一个包含我方设备名的祖先
             //   就是这张卡片的容器；如果这个容器里还有**别的**设备名，说明爬到了球列表那一层
             //   （球列表里所有设备名都在同一棵子树里），必须放弃。
             //   不这么做的话，会把 MagicFree4（Enco Free4）的卡片一起改坏 —— 实测踩过。
-            val scope = ancestorContainingAlso(target, OUR_NAME, OTHER_DEVICE_NAMES) ?: continue
-            // 层级实测（2026-11-02 dump 真机视图树）：
-            //   响铃查找 = HwTextView#service_name → LinearLayout[2](名字+状态) → LinearLayout#service_card_root[3]
-            //   噪声档位 = HwTextView#noise_mode_text → LinearLayout[2](图标+文案) → 档位按钮根
-            // 两处的形状一致：**文案的上两层的兄弟容器就是这一颗按钮/这一张子卡的根**。
-            // 只隐藏上一层会剩下图标和一个空框（这是第一版的实际效果），所以往上取两层。
-            val upOne = target.parent as? android.view.View
-            val upTwo = upOne?.parent as? android.view.View
-            // 响铃查找：上两层 = service_card_root（整张子卡）
-            // 自适应  ：上两层 = 整排四个档位按钮的容器 → 会把「关闭/降噪/通透」一起藏掉（实测踩过），
-            //           所以只取上一层 = 这一颗按钮本身。
-            var node: android.view.View = if (text == "响铃查找") {
-                upTwo ?: upOne ?: target
-            } else {
-                upOne ?: target
-            }
-            if (node === scope || node.parent === null) node = upOne ?: target
-            if (node.visibility != android.view.View.GONE) {
-                node.visibility = android.view.View.GONE
-                hidden++
-            }
-            // 排障：把「这一行所在的卡片容器」的视图树 dump 出来，确认层级。
-            if (text == "响铃查找" && readGlobal("magicxm4_diag_dump_ui") == "1") {
-                runCatching {
-                    val sb = StringBuilder()
-                    dumpTree(scope, 0, sb)
-                    setGlobal("magicxm4_diag_ui", sb.toString())
+            val scope = ancestorContainingAlso(target, OUR_NAME, OTHER_DEVICE_NAMES)
+            if (scope != null) {
+                // 层级实测（2026-11-02 dump 真机视图树）：
+                //   噪声档位 = HwTextView#noise_mode_text → LinearLayout[2](图标+文案) → 档位按钮根
+                // 自适应只取上一层 = 这一颗按钮本身；取上两层会把整排四个档位
+                // 按钮的容器藏掉、连「关闭/降噪/通透」一起误伤（实测踩过）。
+                val upOne = target.parent as? android.view.View
+                val node: android.view.View = upOne ?: target
+                if (node.visibility != android.view.View.GONE) {
+                    node.visibility = android.view.View.GONE
+                    hidden++
                 }
             }
         }
