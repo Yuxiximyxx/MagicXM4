@@ -2,10 +2,8 @@ import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.agp.app)
-    alias(libs.plugins.kotlin)
     alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.composeCompiler)
-    id("kotlin-parcelize")
 }
 
 // 发布签名密钥库。*.jks 在 .gitignore 里，克隆仓库后该文件默认不存在；
@@ -14,14 +12,14 @@ val releaseKeystore = file("signing/magicxm4.jks")
 
 android {
     namespace = "io.github.yuxiximyxx.magicxm4"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "io.github.yuxiximyxx.magicxm4"
         minSdk = 34   // Android 14 (MagicOS 8 / HarmonyOS NEXT)
         targetSdk = 35
-        versionCode = 302400
-        versionName = "3.0.24"
+        versionCode = 302500
+        versionName = "3.1.0"
     }
 
     signingConfigs {
@@ -84,9 +82,6 @@ android {
         checkReleaseBuilds = false
     }
 
-    tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {
-        enabled = false
-    }
 
     // LSPosed 现代模块声明（META-INF/xposed/{module.prop,java_init.list,scope.list}）
     // 必须作为「Java resources」打进 APK 根目录，LSPosed 靠扫描 APK zip 条目识别模块。
@@ -221,7 +216,7 @@ configurations.configureEach {
     // Force Kotlin stdlib to match our compiler version
     resolutionStrategy.eachDependency {
         if (requested.group == "org.jetbrains.kotlin" && requested.name.startsWith("kotlin-stdlib")) {
-            useVersion("2.0.21")
+            useVersion("2.4.10")
             because("Must match Kotlin compiler version")
         }
     }
@@ -244,21 +239,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Compose BOM
-    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    implementation(platform(libs.compose.bom))
     implementation("androidx.compose.ui:ui:1.7.2")
     implementation("androidx.compose.foundation:foundation:1.7.2")
     implementation("androidx.compose.ui:ui-tooling-preview:1.7.2")
     debugImplementation("androidx.compose.ui:ui-tooling:1.7.2")
-    implementation("androidx.compose.material3:material3:1.3.0")
+    implementation(libs.compose.material3)
 
-    // Miuix UI —— 实测不可用：miuix 0.9.x 的 kotlin metadata = 2.4.0，需 Kotlin 2.4.10；
-    // 但升 Kotlin 2.4.10 后 Gradle 8.9 又报 kotlin.concurrent.atomics.AtomicsKt 缺失
-    // （需 Gradle 9 + AGP 9，连带升级有破坏现有可用模块的风险）。详见 docs/magicos11-integration.md
-    // implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
-    // implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
-    // implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
-    // implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
-    // implementation("top.yukonga.miuix.kmp:miuix-navigation3-ui-android:0.9.3")
+    // Miuix UI 0.8.8（工具链对齐 Kotlin 2.4.10 + Gradle 9 + AGP 9 后接入；详情页 MIUIX 迁移）
+    implementation(libs.miuix)
+    implementation(libs.miuix.icons)
     implementation("androidx.navigation3:navigation3-runtime:1.1.4")
 
     // 纯 JVM 单测（欢律协议层不依赖 Android，见 pods/hem/*）
