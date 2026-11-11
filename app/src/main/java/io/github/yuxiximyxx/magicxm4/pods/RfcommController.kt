@@ -822,8 +822,7 @@ object RfcommController {
 
         // 低电量通知：耳机电量 ≤20% 且未充电
         val low = buildList {
-            if (l in 1..20 && !lCharging) add("左耳 $l%")
-            if (r in 1..20 && !rCharging) add("右耳 $r%")
+            if (l in 1..20 && !lCharging) add("电量 $l%")
         }
         if (low.isEmpty()) return
         val now = System.currentTimeMillis()

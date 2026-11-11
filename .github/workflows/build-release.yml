@@ -46,13 +46,13 @@ jobs:
           mkdir -p dist
           SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
           echo "release apk: $SRC"
-          cp "$SRC" dist/MagicXM4-3.1.0-release.apk
+          cp "$SRC" dist/MagicXM4-3.1.1-release.apk
           ls -lh dist
 
       - name: Verify signature
         run: |
           SDK=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.1.0-release.apk
+          "$SDK/apksigner" verify --print-certs dist/MagicXM4-3.1.1-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,24 +64,23 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.1.0
-          name: MagicXM4 v3.1.0 — 耳机详情页迁 MIUIX（工具链对齐 + Miuix 真组件）
+          tag_name: v3.1.1
+          name: MagicXM4 v3.1.1 — 未连接不显示电量 + 历史/提醒去掉左右耳字样
           body: |
-            ## MagicXM4 3.1.0（叠在 3.0.24 之上）
+            ## MagicXM4 3.1.1（补丁，叠在 3.1.0 之上）
 
-            耳机详情页迁移到 MIUIX，与 MagicPods v2.11.0
-            同一配方：工具链对齐 AGP 9.1.1 / Kotlin
-            2.4.10 / Compose BOM 2026.05.00 / Gradle
-            9.3.1 / compileSdk 36，接入 Miuix-KMP
-            0.8.8。主题换 MiuixTheme，骨架换 Scaffold +
-            SmallTopAppBar，分区换 Card + SmallTitle，
-            导航/开关/信息行换 SuperArrow / SuperSwitch /
-            BasicComponent，滑杆与弹窗换 Miuix Slider /
-            WindowDialog；自绘电量环与降噪分段保留原绘
-            制。功能与数据流零变化，hooks/协议/winProbe
-            等探针逐行未动。
+            修 3.1.0 真机验收发现的两个问题：
 
-            签名与 3.0.24 同证书（SHA-256: 62F45C54…
-            8C55），可直接覆盖装。详情页视觉变化请到
-            详情页目检。
+            1. 未连接时详情页仍显示上次电量：只在显示层
+               加连接门控，未连接时电量环显示「--」、不
+               画弧，连接后照常显示。电量数据本身保留
+               （设备中心卡、电量历史、低电量提醒靠它）。
+            2. 电量历史与低电量提醒去掉左右耳字样：XM4
+               只有一颗总电量，历史行改显示「电量 X%」，
+               低电量提醒合并为一条「电量 X%」。历史存储
+               格式未动，旧记录照常显示。
+
+            其余（MIUIX 界面、hooks、协议、工具链）与
+            3.1.0 逐行一致，同证书（SHA-256: 62F45C54…
+            8C55），可直接覆盖装。
           files: dist/*.apk

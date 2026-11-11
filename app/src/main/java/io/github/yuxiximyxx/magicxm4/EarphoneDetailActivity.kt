@@ -607,7 +607,7 @@ class EarphoneDetailActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
-                    BatteryRing("电量", bat[0])
+                    BatteryRing("电量", if (connected) bat[0] else -1)
                 }
             }
 
@@ -891,7 +891,7 @@ class EarphoneDetailActivity : ComponentActivity() {
                                     ) {
                                         Text(p[0], fontSize = 13.sp, color = P.textSecondary,
                                             modifier = Modifier.width(56.dp))
-                                        Text("左 ${p[1]}%   右 ${p[2]}%   仓 ${p[3]}%",
+                                        Text("电量 ${p[1]}%",
                                             fontSize = 14.sp, color = P.textPrimary)
                                     }
                                     if (i != rows.lastIndex) Line()
